@@ -931,6 +931,45 @@ public class OpenClawGatewayClientTests
     }
 
     [Fact]
+    public void HelloOkWhenTokenWriteFails_CompletesHandshakeAndPublishesToken()
+    {
+        var identityPath = CreateTempIdentityPath();
+        var helper = new GatewayClientTestHelper(
+            tokenIsBootstrapToken: true,
+            identityPath: identityPath);
+        var handshakeSucceeded = false;
+        DeviceTokenReceivedEventArgs? receivedToken = null;
+        helper.Client.HandshakeSucceeded += (_, _) => handshakeSucceeded = true;
+        helper.Client.DeviceTokenReceived += (_, e) => receivedToken = e;
+
+        using (new FileStream(
+            Path.Combine(identityPath, "device-key-ed25519.json"),
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read))
+        {
+            helper.ProcessRawMessage("""
+            {
+              "type": "res",
+              "id": "req-hello-operator",
+              "payload": {
+                "type": "hello-ok",
+                "auth": {
+                  "deviceToken": "operator-token",
+                  "role": "operator",
+                  "scopes": ["operator.read"]
+                }
+              }
+            }
+            """);
+        }
+
+        Assert.True(handshakeSucceeded);
+        Assert.Equal("operator-token", receivedToken?.Token);
+        Assert.Equal("operator", receivedToken?.Role);
+    }
+
+    [Fact]
     public void BootstrapNodeHandoff_PrefersOperatorTokenFromAdditionalDeviceTokens()
     {
         var helper = new GatewayClientTestHelper();

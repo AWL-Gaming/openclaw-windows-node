@@ -109,7 +109,6 @@ public class WindowsNodeClientTests
     [InlineData("too many failed authentication attempts", GatewayErrorKind.RateLimited)]
     [InlineData("device token mismatch", GatewayErrorKind.TokenDrift)]
     [InlineData("origin not allowed", GatewayErrorKind.Auth)]
-    [InlineData("gateway internal error", GatewayErrorKind.Server)]
     public void HandleResponse_TerminalError_EmitsFiniteFailureClassification(
         string message,
         GatewayErrorKind expectedKind)
@@ -136,6 +135,39 @@ public class WindowsNodeClientTests
             client.HandleResponse(document.RootElement);
 
             Assert.Equal(expectedKind, actualKind);
+        }
+        finally
+        {
+            Directory.Delete(dataPath, true);
+        }
+    }
+
+    [Fact]
+    public void HandleResponse_ReconnectableServerError_DoesNotEmitTerminalFailure()
+    {
+        var dataPath = Path.Combine(Path.GetTempPath(), $"openclaw-node-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataPath);
+
+        try
+        {
+            using var client = new WindowsNodeClient("ws://localhost:18789", "test-token", dataPath);
+            GatewayErrorKind? actualKind = null;
+            client.ConnectionFailure += (_, kind) => actualKind = kind;
+            using var document = JsonDocument.Parse(
+                """
+                {
+                  "type": "res",
+                  "ok": false,
+                  "error": {
+                    "message": "gateway internal error",
+                    "code": "TEST_ERROR"
+                  }
+                }
+                """);
+
+            client.HandleResponse(document.RootElement);
+
+            Assert.Null(actualKind);
         }
         finally
         {
@@ -200,6 +232,50 @@ public class WindowsNodeClientTests
             {
                 Directory.Delete(dataPath, true);
             }
+        }
+    }
+
+    [Fact]
+    public void HandleResponse_HelloOkWhenTokenWriteFails_CompletesHandshakeAndPublishesToken()
+    {
+        var dataPath = Path.Combine(Path.GetTempPath(), $"openclaw-node-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataPath);
+
+        try
+        {
+            using var client = new WindowsNodeClient("ws://localhost:18789", "test-token", dataPath);
+            var identityPath = Path.Combine(dataPath, "device-key-ed25519.json");
+            var handshakeSucceeded = false;
+            DeviceTokenReceivedEventArgs? receivedToken = null;
+            client.HandshakeSucceeded += (_, _) => handshakeSucceeded = true;
+            client.DeviceTokenReceived += (_, e) => receivedToken = e;
+
+            using (new FileStream(identityPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                using var document = JsonDocument.Parse(
+                    """
+                    {
+                      "type": "res",
+                      "ok": true,
+                      "payload": {
+                        "type": "hello-ok",
+                        "nodeId": "test-node-id",
+                        "auth": {
+                          "deviceToken": "test-device-token"
+                        }
+                      }
+                    }
+                    """);
+                client.HandleResponse(document.RootElement);
+            }
+
+            Assert.True(handshakeSucceeded);
+            Assert.Equal("test-device-token", receivedToken?.Token);
+            Assert.Equal("node", receivedToken?.Role);
+        }
+        finally
+        {
+            Directory.Delete(dataPath, true);
         }
     }
 

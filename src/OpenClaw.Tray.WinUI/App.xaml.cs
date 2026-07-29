@@ -799,6 +799,11 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
                 setupShownDuringStartup = true;
             }
         }
+        catch (DeviceIdentityLoadException ex)
+        {
+            Logger.Error($"Stored device identity load failed during launch setup detection: {ex.InnerException?.Message}");
+            ShowTransientConnectionError(ex.Message);
+        }
         catch (Exception ex)
         {
             Logger.Error($"Onboarding failed during launch (tray remains available): {ex}");
@@ -1471,8 +1476,24 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
     private TrayMenuSnapshot CaptureTrayMenuSnapshot()
     {
         // Show "Reconfigure" if there's an existing setup, "Setup Guide" if fresh
-        var hasExistingConfig = _settings != null
-            && !StartupSetupState.RequiresSetup(_settings, IdentityDataPath, _gatewayRegistry);
+        var hasExistingConfig = false;
+        if (_settings != null)
+        {
+            try
+            {
+                hasExistingConfig = !StartupSetupState.RequiresSetup(
+                    _settings,
+                    IdentityDataPath,
+                    _gatewayRegistry);
+            }
+            catch (DeviceIdentityLoadException ex)
+            {
+                Logger.Error($"Stored device identity load failed while opening the tray menu: {ex.InnerException?.Message}");
+                ShowTransientConnectionError(ex.Message);
+                hasExistingConfig = true;
+            }
+        }
+
         var hasSetupManagedLocalWslGateway = WslKeepAlivePolicy.HasSetupManagedLocalGateway(_gatewayRegistry?.GetAll());
         var setupMenuLabel = hasExistingConfig
             ? LocalizationHelper.GetString("Menu_Reconfigure")
@@ -1650,8 +1671,20 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         else
         {
             // No record yet — create one from settings URL if we have a stored device token.
-            var hasStoredDeviceToken = DeviceIdentity.HasStoredDeviceToken(
-                Path.Combine(SettingsManager.SettingsDirectoryPath));
+            bool hasStoredDeviceToken;
+            try
+            {
+                hasStoredDeviceToken = DeviceIdentity.HasStoredDeviceToken(
+                    Path.Combine(SettingsManager.SettingsDirectoryPath));
+            }
+            catch (DeviceIdentityLoadException ex)
+            {
+                Logger.Error($"Stored device identity load failed during startup: {ex.InnerException?.Message}");
+                ShowTransientConnectionError(ex.Message);
+                TryStartLocalMcpOnlyNode();
+                return;
+            }
+
             if (!hasStoredDeviceToken)
             {
                 if (TryStartLocalMcpOnlyNode())
@@ -1723,10 +1756,32 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         record = SyncGatewayBrowserProxyForward(record);
         var resolver = new CredentialResolver(DeviceIdentityFileReader.Instance);
         var identityDir = _gatewayRegistry.GetIdentityDirectory(record.Id);
-        var credential = ResolveStartupOperatorCredential(record, resolver, identityDir);
+        OpenClaw.Connection.GatewayCredential? credential;
+        try
+        {
+            credential = ResolveStartupOperatorCredential(record, resolver, identityDir);
+        }
+        catch (DeviceIdentityLoadException ex)
+        {
+            Logger.Error($"Stored device identity load failed during {context}: {ex.InnerException?.Message}");
+            ShowTransientConnectionError(ex.Message);
+            return false;
+        }
+
         if (credential == null)
         {
-            var nodeCredential = ResolveStartupNodeCredential(record, resolver, identityDir);
+            OpenClaw.Connection.GatewayCredential? nodeCredential;
+            try
+            {
+                nodeCredential = ResolveStartupNodeCredential(record, resolver, identityDir);
+            }
+            catch (DeviceIdentityLoadException ex)
+            {
+                Logger.Error($"Stored node identity load failed during {context}: {ex.InnerException?.Message}");
+                ShowTransientConnectionError(ex.Message);
+                return false;
+            }
+
             if (nodeCredential != null && IsGatewayNodeEnabled())
             {
                 Logger.Info(
@@ -1839,7 +1894,8 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         if (_gatewayRegistry == null)
             return null;
 
-        var credential = resolver.ResolveOperator(record, identityDir);
+        var resolution = resolver.ResolveOperatorDetailed(record, identityDir);
+        var credential = ResolveStartupCredentialOrThrow(resolution, identityDir);
         if (credential != null)
             return credential;
 
@@ -1849,7 +1905,8 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         if (!string.IsNullOrWhiteSpace(effectiveUrl) &&
             string.Equals(record.Url, effectiveUrl, StringComparison.OrdinalIgnoreCase))
         {
-            return resolver.ResolveOperator(record, SettingsManager.SettingsDirectoryPath);
+            resolution = resolver.ResolveOperatorDetailed(record, SettingsManager.SettingsDirectoryPath);
+            return ResolveStartupCredentialOrThrow(resolution, SettingsManager.SettingsDirectoryPath);
         }
 
         return null;
@@ -1860,7 +1917,8 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         CredentialResolver resolver,
         string identityDir)
     {
-        var credential = resolver.ResolveNode(record, identityDir);
+        var resolution = resolver.ResolveNodeDetailed(record, identityDir);
+        var credential = ResolveStartupCredentialOrThrow(resolution, identityDir);
         if (credential != null)
             return credential;
 
@@ -1871,12 +1929,33 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
             return null;
         }
 
-        credential = resolver.ResolveNode(record, SettingsManager.SettingsDirectoryPath);
+        resolution = resolver.ResolveNodeDetailed(record, SettingsManager.SettingsDirectoryPath);
+        credential = ResolveStartupCredentialOrThrow(resolution, SettingsManager.SettingsDirectoryPath);
         if (credential == null)
             return null;
 
         TryCopyLegacyIdentityToGateway(record.Id, identityDir);
         return credential;
+    }
+
+    private static OpenClaw.Connection.GatewayCredential? ResolveStartupCredentialOrThrow(
+        GatewayCredentialResolution resolution,
+        string identityDir)
+    {
+        var failureStatus = resolution.PrimaryStatus ?? resolution.Status;
+        if (failureStatus is not (
+            GatewayCredentialResolutionStatus.Unreadable
+            or GatewayCredentialResolutionStatus.Corrupt))
+        {
+            return resolution.Credential;
+        }
+
+        Exception cause = failureStatus == GatewayCredentialResolutionStatus.Unreadable
+            ? new IOException(resolution.Detail ?? "Identity file could not be read.")
+            : new InvalidDataException(resolution.Detail ?? "Identity file is invalid.");
+        throw new DeviceIdentityLoadException(
+            Path.Combine(identityDir, "device-key-ed25519.json"),
+            cause);
     }
 
     private static void TryCopyLegacyIdentityToGateway(string gatewayId, string identityDir)
