@@ -24,9 +24,6 @@ public class WindowsNodeClient : WebSocketClientBase
     private FrozenDictionary<string, CommandDispatchEntry> _commandMap =
         FrozenDictionary<string, CommandDispatchEntry>.Empty;
     private readonly NodeRegistration _registration;
-    private const string WindowsPlatform = "windows";
-    private const string WindowsDeviceFamily = "Windows";
-    
     // Connection state
     private bool _isConnected;
     private string? _nodeId;
@@ -139,8 +136,8 @@ public class WindowsNodeClient : WebSocketClientBase
         {
             Id = _deviceIdentity.DeviceId,
             Version = AppVersionInfo.Version,
-            Platform = WindowsPlatform,
-            DeviceFamily = WindowsDeviceFamily,
+            Platform = WindowsClientMetadata.Platform,
+            DeviceFamily = WindowsClientMetadata.DeviceFamily,
             DisplayName = $"Windows Node ({Environment.MachineName})"
         };
     }
