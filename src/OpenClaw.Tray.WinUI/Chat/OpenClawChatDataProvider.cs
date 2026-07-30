@@ -122,6 +122,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
     private long _historyConnectionVersion;
     private readonly Dictionary<string, Task> _pendingModelPatches = new(); // sessionKey -> in-flight model set/clear
     private readonly Dictionary<string, long> _resetVersions = new(); // sessionKey -> reset generation
+    private readonly Dictionary<string, long> _historyRevisions = new(); // sessionKey -> completed history rebuild revision
     private readonly Dictionary<string, long> _resetCutoffUtcMs = new(); // sessionKey -> local reset time
     private readonly HashSet<string> _resetAwaitingUserMessage = new(); // threads reset and waiting for first post-reset turn
     private readonly Dictionary<string, HashSet<string>> _resetIgnoredRunIds = new(); // sessionKey -> pre-reset run IDs to drop
@@ -1494,6 +1495,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 }
 
                 _timelines[threadId] = rebuilt;
+                _historyRevisions[threadId] = GetHistoryRevisionLocked(threadId) + 1;
                 _entryMeta[threadId] = rebuiltMeta;
                 _historyLoaded.Add(threadId);
                 _historyRetryCount.Remove(threadId);
@@ -5214,6 +5216,9 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
     private long GetResetVersionLocked(string threadId) =>
         _resetVersions.TryGetValue(threadId, out var version) ? version : 0;
 
+    private long GetHistoryRevisionLocked(string threadId) =>
+        _historyRevisions.TryGetValue(threadId, out var revision) ? revision : 0;
+
     private long GetResetCutoffUtcMsLocked(string threadId) =>
         _resetCutoffUtcMs.TryGetValue(threadId, out var cutoff) ? cutoff : 0;
 
@@ -6204,6 +6209,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         // Snapshot a defensive copy of the timeline dict.
         var timelinesCopy = new Dictionary<string, ChatTimelineState>(_timelines);
         var timelineGenerationsCopy = new Dictionary<string, long>(_resetVersions);
+        var historyRevisionsCopy = new Dictionary<string, long>(_historyRevisions);
         var queuedMessagesCopy = _queuedMessages.ToDictionary(
             kvp => kvp.Key,
             kvp => (IReadOnlyList<ChatQueuedMessage>)kvp.Value.ToArray());
@@ -6244,6 +6250,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             AvailableCommands: _commandCatalog?.Commands,
             CommandsSupported: _commandCatalog?.IsSupported ?? true,
             TimelineGenerations: timelineGenerationsCopy,
+            HistoryRevisions: historyRevisionsCopy,
             QueuedMessagesByThread: queuedMessagesCopy);
     }
 

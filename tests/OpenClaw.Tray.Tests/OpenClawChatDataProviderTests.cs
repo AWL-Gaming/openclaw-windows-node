@@ -2255,7 +2255,7 @@ public class OpenClawChatDataProviderTests
         {
             SessionKey = "main",
             Role = "assistant",
-            Text = "NO_REPLY",
+            Text = "no_reply",
             State = "final"
         });
 
@@ -5475,7 +5475,7 @@ public class OpenClawChatDataProviderTests
             Messages = new[]
             {
                 new ChatMessageInfo { Role = "user", Text = "Hi", State = "final" },
-                new ChatMessageInfo { Role = "assistant", Text = "NO_REPLY", State = "final" },
+                new ChatMessageInfo { Role = "assistant", Text = "no_reply", State = "final" },
                 new ChatMessageInfo { Role = "assistant", Text = "Visible", State = "final" }
             }
         });

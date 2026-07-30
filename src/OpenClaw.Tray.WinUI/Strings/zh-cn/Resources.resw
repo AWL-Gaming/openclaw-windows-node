@@ -4763,12 +4763,6 @@
   <data name="SettingsPage_Chat.Text" xml:space="preserve">
     <value>聊天</value>
   </data>
-  <data name="SettingsRow_ReadAloud_Header.Text" xml:space="preserve">
-    <value>朗读回复</value>
-  </data>
-  <data name="SettingsRow_ReadAloud_Description.Text" xml:space="preserve">
-    <value>在聊天期间通过文本转语音播放助手回复。</value>
-  </data>
   <data name="SettingsRow_ShowToolCalls_Header.Text" xml:space="preserve">
     <value>显示工具调用和用量</value>
   </data>

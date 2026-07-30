@@ -4764,12 +4764,6 @@ Opdrachten worden geblokkeerd zolang sandboxing niet beschikbaar is, omdat strik
   <data name="SettingsPage_Chat.Text" xml:space="preserve">
     <value>Gesprek</value>
   </data>
-  <data name="SettingsRow_ReadAloud_Header.Text" xml:space="preserve">
-    <value>Antwoorden hardop voorlezen</value>
-  </data>
-  <data name="SettingsRow_ReadAloud_Description.Text" xml:space="preserve">
-    <value>Lees antwoorden van de assistent hardop voor tijdens het gesprek.</value>
-  </data>
   <data name="SettingsRow_ShowToolCalls_Header.Text" xml:space="preserve">
     <value>Toolaanroepen en gebruik weergeven</value>
   </data>

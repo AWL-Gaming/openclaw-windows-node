@@ -4810,12 +4810,6 @@ Commands are blocked while sandboxing is unavailable because strict fallback blo
   <data name="SettingsPage_Chat.Text" xml:space="preserve">
     <value>Chat</value>
   </data>
-  <data name="SettingsRow_ReadAloud_Header.Text" xml:space="preserve">
-    <value>Read responses aloud</value>
-  </data>
-  <data name="SettingsRow_ReadAloud_Description.Text" xml:space="preserve">
-    <value>Play assistant replies through text-to-speech during chat.</value>
-  </data>
   <data name="SettingsRow_ShowToolCalls_Header.Text" xml:space="preserve">
     <value>Show tool calls and usage</value>
   </data>
