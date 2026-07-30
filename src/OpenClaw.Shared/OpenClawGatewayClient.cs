@@ -1428,7 +1428,7 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
         var role = GetConnectRole();
         var requestedScopes = GetRequestedScopes(role);
 
-        var signedAt = _challengeTimestampMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var signedAt = ConnectAuthTimestamp.ResolveSignedAt(_challengeTimestampMs);
         var connectNonce = nonce ?? string.Empty;
         var signatureToken = GetSignatureToken();
         var authPayload = BuildAuthPayload();
@@ -2146,6 +2146,7 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
     private void HandleRequestError(string? method, JsonElement root)
     {
         var message = TryGetErrorMessage(root) ?? "request failed";
+        var detailCode = method == "connect" ? TryGetErrorDetailCode(root) : null;
 
         if (string.IsNullOrEmpty(method))
         {
@@ -2155,7 +2156,6 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
 
         if (method == "connect")
         {
-            var detailCode = TryGetErrorDetailCode(root);
             _logger.Warn($"[HANDSHAKE] Connect error from gateway: message=\"{message}\", detailCode={detailCode ?? "none"}");
             // Log raw JSON for debugging (truncated)
             var rawJson = root.ToString() ?? "";
@@ -2163,9 +2163,17 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
             _logger.Info($"[HANDSHAKE] Raw error response: {rawJson}");
         }
 
+        if (method == "connect" && detailCode == "DEVICE_AUTH_SIGNATURE_EXPIRED")
+        {
+            _authFailed = true;
+            RaiseAuthenticationFailed($"{detailCode}: {message}");
+            RaiseStatusChanged(ConnectionStatus.Error);
+            return;
+        }
+
         if (method == "connect" &&
             (message.Contains("device signature invalid", StringComparison.OrdinalIgnoreCase) ||
-             TryGetErrorDetailCode(root) == "DEVICE_AUTH_SIGNATURE_INVALID"))
+             detailCode == "DEVICE_AUTH_SIGNATURE_INVALID"))
         {
             if (!_useV2Signature)
             {
@@ -2197,8 +2205,7 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
         }
 
         // Permanent auth failures — stop retrying and notify the app
-        var detailCode2 = TryGetErrorDetailCode(root);
-        if (method == "connect" && (IsTerminalAuthError(message) || IsTerminalAuthDetailCode(detailCode2)))
+        if (method == "connect" && (IsTerminalAuthError(message) || IsTerminalAuthDetailCode(detailCode)))
         {
             _authFailed = true;
             RaiseAuthenticationFailed(message);
@@ -2344,12 +2351,7 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
     {
         if (!root.TryGetProperty("error", out var error) || error.ValueKind != JsonValueKind.Object)
             return null;
-        if (TryGetPairingDetailsElement(error, out var details) &&
-            details.ValueKind == JsonValueKind.Object &&
-            details.TryGetProperty("code", out var code) &&
-            code.ValueKind == JsonValueKind.String)
-            return code.GetString();
-        return null;
+        return TryGetErrorDetailString(error, "code");
     }
 
     private static PairingConnectErrorDetails TryGetPairingConnectErrorDetails(JsonElement root)
@@ -2357,30 +2359,58 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
         if (!root.TryGetProperty("error", out var error) || error.ValueKind != JsonValueKind.Object)
             return default;
 
-        if (!TryGetPairingDetailsElement(error, out var details) || details.ValueKind != JsonValueKind.Object)
-            return default;
-
-        var isPairingRequired = details.TryGetProperty("code", out var code)
-            && code.ValueKind == JsonValueKind.String
-            && string.Equals(code.GetString(), "PAIRING_REQUIRED", StringComparison.Ordinal);
-        var requestId = GetSafeRequestId(details, "requestId");
+        var isPairingRequired = string.Equals(
+            TryGetErrorDetailString(error, "code"),
+            "PAIRING_REQUIRED",
+            StringComparison.Ordinal);
+        var requestId = TryGetSafeErrorDetailRequestId(error);
         return new PairingConnectErrorDetails(isPairingRequired, requestId);
     }
 
-    private static bool TryGetPairingDetailsElement(JsonElement error, out JsonElement details)
+    private static string? TryGetErrorDetailString(JsonElement error, string property)
     {
-        if (error.TryGetProperty("details", out details))
-            return true;
+        if (error.TryGetProperty("details", out var details) &&
+            details.ValueKind == JsonValueKind.Object &&
+            details.TryGetProperty(property, out var value) &&
+            value.ValueKind == JsonValueKind.String &&
+            !string.IsNullOrWhiteSpace(value.GetString()))
+        {
+            return value.GetString();
+        }
 
         if (error.TryGetProperty("data", out var data)
             && data.ValueKind == JsonValueKind.Object
-            && data.TryGetProperty("details", out details))
+            && data.TryGetProperty("details", out details)
+            && details.ValueKind == JsonValueKind.Object
+            && details.TryGetProperty(property, out value)
+            && value.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(value.GetString()))
         {
-            return true;
+            return value.GetString();
         }
 
-        details = default;
-        return false;
+        return null;
+    }
+
+    private static string? TryGetSafeErrorDetailRequestId(JsonElement error)
+    {
+        if (error.TryGetProperty("details", out var details) &&
+            details.ValueKind == JsonValueKind.Object)
+        {
+            var requestId = GetSafeRequestId(details, "requestId");
+            if (requestId is not null)
+                return requestId;
+        }
+
+        if (error.TryGetProperty("data", out var data) &&
+            data.ValueKind == JsonValueKind.Object &&
+            data.TryGetProperty("details", out details) &&
+            details.ValueKind == JsonValueKind.Object)
+        {
+            return GetSafeRequestId(details, "requestId");
+        }
+
+        return null;
     }
 
     private static string? GetSafeRequestId(JsonElement parent, string property)
@@ -2410,7 +2440,7 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
     private static bool IsTerminalAuthDetailCode(string? code) => code is
         "AUTH_TOKEN_MISMATCH" or "AUTH_BOOTSTRAP_TOKEN_INVALID" or
         "AUTH_DEVICE_TOKEN_MISMATCH" or "AUTH_RATE_LIMITED" or
-        "AUTH_TOKEN_NOT_CONFIGURED";
+        "AUTH_TOKEN_NOT_CONFIGURED" or "DEVICE_AUTH_SIGNATURE_EXPIRED";
 
     private static bool IsMissingScopeError(string errorMessage, string scope)
     {
@@ -2954,15 +2984,13 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
     {
         string? nonce = null;
         long? ts = null;
-        if (root.TryGetProperty("payload", out var payload) &&
-            payload.TryGetProperty("nonce", out var nonceProp))
+        if (root.TryGetProperty("payload", out var payload))
         {
-            nonce = nonceProp.GetString();
-
-            if (payload.TryGetProperty("ts", out var tsProp) && tsProp.ValueKind == JsonValueKind.Number)
+            if (payload.TryGetProperty("nonce", out var nonceProp))
             {
-                ts = tsProp.GetInt64();
+                nonce = nonceProp.GetString();
             }
+            ts = ConnectAuthTimestamp.ReadChallengeTimestamp(payload);
         }
 
         _challengeTimestampMs = ts;
