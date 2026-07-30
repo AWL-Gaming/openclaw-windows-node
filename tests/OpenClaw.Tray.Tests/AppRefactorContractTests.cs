@@ -376,14 +376,41 @@ public sealed class AppRefactorContractTests
     }
 
     [Fact]
-    public void PermissionsPage_ExecPolicy_UsesAppDataDirectory()
+    public void PermissionsPage_ExecApprovals_UsesAppOwnedStoreWithCas()
     {
         var root = TestRepositoryPaths.GetRepositoryRoot();
         var source = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "Pages", "PermissionsPage.xaml.cs"));
 
-        Assert.Contains("Path.Combine(CurrentApp.DataDirectoryPath, \"exec-policy.json\")", source);
-        Assert.DoesNotContain("SpecialFolder.LocalApplicationData", source);
-        Assert.DoesNotContain("SettingsManager.SettingsDirectoryPath, \"exec-policy.json\"", source);
+        Assert.Contains("CurrentApp.ExecApprovalsStore.GetSnapshotAsync()", source);
+        Assert.Contains("CurrentApp.ExecApprovalsStore.ReplaceAsync(expectedHash, file)", source);
+        Assert.Contains("ExecPolicyMutationKind.AddRule", source);
+        Assert.Contains("ExecPolicyMutationKind.RemoveRule", source);
+        Assert.DoesNotContain("main.Allowlist = _policyRules", source);
+        Assert.DoesNotContain("Path.Combine(CurrentApp.DataDirectoryPath, \"exec-approvals.json\")", source);
+        Assert.DoesNotContain("File.WriteAllText(tmpPath", source);
+    }
+
+    [Fact]
+    public void App_ExecApprovalsStore_UsesRoamingProductionDataRoot()
+    {
+        var source = ReadAppSources();
+
+        Assert.Contains("_execApprovalsStore ??= new ExecApprovalsStore(", source);
+        Assert.Contains("AppIdentity.ResolveRoamingDataDirectory()", source);
+    }
+
+    [Fact]
+    public void TrayArtifactCleanup_UsesActiveExecApprovalsStatePath()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var source = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.SetupEngine",
+            "TrayArtifactCleanup.cs"));
+
+        Assert.Contains("ExecApprovalsStore.ResolveFilePath(appDataDir)", source);
+        Assert.Contains("legacyExecApprovalsPath", source);
     }
 
     [Fact]
