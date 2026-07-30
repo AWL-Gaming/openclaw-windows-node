@@ -242,10 +242,29 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
     public event EventHandler<string?>? PairingRequired;
     /// <summary>Raised when v3 signature was rejected and client fell back to v2.</summary>
     public event EventHandler? V2SignatureFallback;
+    /// <summary>
+    /// Raised with the typed reason for an operator connection failure. Consumers should use this
+    /// kind for policy/UI decisions and keep the accompanying text only for sanitized detail.
+    /// </summary>
+    public event EventHandler<GatewayErrorKind>? ConnectionFailure;
 
     public string? OperatorDeviceId => _operatorDeviceId;
     public IReadOnlyList<string> GrantedOperatorScopes => _grantedOperatorScopes;
     public virtual bool IsConnectedToGateway => IsConnected;
+
+    protected override void OnConnectionException(Exception exception)
+    {
+        RaiseConnectionFailure(GatewayErrorClassifier.Classify(exception.ToString()));
+    }
+
+    protected override void OnReconnectAuthorizationDenied(
+        ReconnectAuthorizationResult authorization)
+    {
+        RaiseConnectionFailure(authorization.FailureKind);
+    }
+
+    protected void RaiseConnectionFailure(GatewayErrorKind kind) =>
+        ConnectionFailure?.Invoke(this, kind);
 
     public OpenClawGatewayClient(string gatewayUrl, string token, IOpenClawLogger? logger = null, bool tokenIsBootstrapToken = false, bool bootstrapPairAsNode = false, string? identityPath = null, bool ignoreStoredDeviceToken = false)
         : base(gatewayUrl, token, logger)
@@ -2188,6 +2207,7 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
             // v2 also rejected — real auth error
             _logger.Warn($"[HANDSHAKE] v2 signature also rejected — wrong key or token. Raw: {message}");
             _authFailed = true;
+            RaiseConnectionFailure(GatewayErrorKind.Auth);
             RaiseAuthenticationFailed($"device signature rejected — {message}");
             RaiseStatusChanged(ConnectionStatus.Error);
             return;
@@ -2204,11 +2224,28 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
             return;
         }
 
-        // Permanent auth failures — stop retrying and notify the app
-        if (method == "connect" && (IsTerminalAuthError(message) || IsTerminalAuthDetailCode(detailCode)))
+        // Permanent auth failures — stop retrying and notify the app. Check BOTH the top-level
+        // error.code and the structured error.details.code so a device-token mismatch delivered in
+        // either place is recognized (the gateway may send the reason only as a code with a generic
+        // message).
+        var topLevelCode = TryGetErrorTopLevelCode(root);
+        if (method == "connect" &&
+            (IsTerminalAuthError(message) || IsTerminalAuthDetailCode(detailCode) || IsTerminalAuthDetailCode(topLevelCode)))
         {
             _authFailed = true;
-            RaiseAuthenticationFailed(message);
+            var failureKind = GatewayErrorClassifier.ClassifyWithCode(message, topLevelCode, detailCode);
+            RaiseConnectionFailure(failureKind);
+            // Preserve a structured device-token mismatch in the raised string so the connection
+            // manager can distinguish it (auto-recoverable) from a wrong shared token and other
+            // terminal auth failures. Only the device-token code is enriched; other codes pass
+            // through unchanged so they are never mistaken for a recoverable device-token drift.
+            var isDeviceMismatch =
+                string.Equals(detailCode, GatewayErrorClassifier.DeviceTokenMismatchCode, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(topLevelCode, GatewayErrorClassifier.DeviceTokenMismatchCode, StringComparison.OrdinalIgnoreCase);
+            var authMessage = isDeviceMismatch
+                ? $"{GatewayErrorClassifier.DeviceTokenMismatchCode}: {message}"
+                : message;
+            RaiseAuthenticationFailed(authMessage);
             RaiseStatusChanged(ConnectionStatus.Error);
             return;
         }
@@ -2352,6 +2389,17 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
         if (!root.TryGetProperty("error", out var error) || error.ValueKind != JsonValueKind.Object)
             return null;
         return TryGetErrorDetailString(error, "code");
+    }
+
+    // Top-level error.code (distinct from the nested error.details.code). A gateway may deliver a
+    // terminal-auth reason (e.g. AUTH_DEVICE_TOKEN_MISMATCH) here with a generic message.
+    private static string? TryGetErrorTopLevelCode(JsonElement root)
+    {
+        if (!root.TryGetProperty("error", out var error) || error.ValueKind != JsonValueKind.Object)
+            return null;
+        if (error.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.String)
+            return code.GetString();
+        return null;
     }
 
     private static PairingConnectErrorDetails TryGetPairingConnectErrorDetails(JsonElement root)

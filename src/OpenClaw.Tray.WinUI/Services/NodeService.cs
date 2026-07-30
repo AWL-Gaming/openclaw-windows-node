@@ -105,6 +105,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
     private readonly Func<int?>? _browserControlPortResolver;
     private readonly Func<SshTunnelConfig?>? _activeGatewayTunnelResolver;
     private readonly Func<string?>? _activeGatewayUrlResolver;
+    private readonly Func<Uri, CancellationToken, Task<bool>>? _browserControlAuthorization;
     private string? _token;
 
     // Authoritative capability list — populated by RegisterCapabilities and
@@ -207,6 +208,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         Func<int?>? browserControlPortResolver = null,
         Func<SshTunnelConfig?>? activeGatewayTunnelResolver = null,
         Func<string?>? activeGatewayUrlResolver = null,
+        Func<Uri, CancellationToken, Task<bool>>? browserControlAuthorization = null,
         ExecApprovalsStore? execApprovalsStore = null)
     {
         _logger = logger;
@@ -217,6 +219,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         _browserControlPortResolver = browserControlPortResolver;
         _activeGatewayTunnelResolver = activeGatewayTunnelResolver;
         _activeGatewayUrlResolver = activeGatewayUrlResolver;
+        _browserControlAuthorization = browserControlAuthorization;
         _execApprovalsStore = execApprovalsStore;
         _settings = settings;
         _enableMcpServer = enableMcpServer;
@@ -427,7 +430,8 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
                 controlPortOverride: _browserControlPortResolver?.Invoke(),
                 useSshTunnel: tunnelState.Enabled,
                 sshTunnelLocalPort: tunnelState.LocalPort,
-                allowGatewayPortFallback: tunnelState.AllowGatewayPortFallback);
+                allowGatewayPortFallback: tunnelState.AllowGatewayPortFallback,
+                authorizeEndpointAsync: _browserControlAuthorization);
             Register(_browserProxyCapability);
         }
 
@@ -523,18 +527,29 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
             // -= before += so a re-attach of the same client (e.g. AttachClient called
             // again after a DisconnectAsync that nulled _nodeClient) doesn't double-subscribe.
             client.StatusChanged -= OnNodeStatusChanged;
+            client.Disposed -= OnNodeClientDisposed;
             client.PairingStatusChanged -= OnPairingStatusChanged;
             client.HealthReceived -= OnNodeHealthReceived;
             client.GatewaySelfUpdated -= OnGatewaySelfUpdated;
             client.InvokeCompleted -= OnNodeInvokeCompleted;
             client.ToolTelemetryCompleted -= OnToolTelemetryCompleted;
             client.StatusChanged += OnNodeStatusChanged;
+            client.Disposed += OnNodeClientDisposed;
             client.PairingStatusChanged += OnPairingStatusChanged;
             client.HealthReceived += OnNodeHealthReceived;
             client.GatewaySelfUpdated += OnGatewaySelfUpdated;
             client.InvokeCompleted += OnNodeInvokeCompleted;
             client.ToolTelemetryCompleted += OnToolTelemetryCompleted;
         }
+
+        var gatewayUrl = client.GatewayUrl;
+        var configuredGatewayUrl = GetConfiguredGatewayUrl();
+        var token = bearerToken;
+        _dispatcherQueue.TryEnqueue(() =>
+        {
+            if (_canvasWindow != null && !_canvasWindow.IsClosed)
+                _canvasWindow.SetTrustedGatewayOrigin(gatewayUrl, token, configuredGatewayUrl);
+        });
 
         bool capabilitiesBuilt;
         lock (_capabilitiesLock)
@@ -563,6 +578,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
     private void DetachClientHandlers(WindowsNodeClient client)
     {
         client.StatusChanged -= OnNodeStatusChanged;
+        client.Disposed -= OnNodeClientDisposed;
         client.PairingStatusChanged -= OnPairingStatusChanged;
         client.HealthReceived -= OnNodeHealthReceived;
         client.GatewaySelfUpdated -= OnGatewaySelfUpdated;
@@ -1051,7 +1067,47 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
     private void OnNodeStatusChanged(object? sender, ConnectionStatus status)
     {
         _logger.Info($"Node status changed: {status}");
+        if (status == ConnectionStatus.Connected)
+        {
+            _dispatcherQueue.TryEnqueue(() =>
+            {
+                if (_canvasWindow != null && !_canvasWindow.IsClosed)
+                    _canvasWindow.SetTrustedGatewayOrigin(GatewayUrl, _token, GetConfiguredGatewayUrl());
+            });
+        }
+        else
+        {
+            _dispatcherQueue.TryEnqueue(() =>
+            {
+                if (_canvasWindow != null && !_canvasWindow.IsClosed)
+                    _canvasWindow.SetTrustedGatewayOrigin(null);
+            });
+        }
         StatusChanged?.Invoke(this, status);
+    }
+
+    private void OnNodeClientDisposed(object? sender, EventArgs args)
+    {
+        var retired = false;
+        lock (_clientLock)
+        {
+            if (sender is WindowsNodeClient client && ReferenceEquals(_nodeClient, client))
+            {
+                DetachClientHandlers(client);
+                _nodeClient = null;
+                _token = null;
+                retired = true;
+            }
+        }
+
+        if (!retired)
+            return;
+
+        _dispatcherQueue.TryEnqueue(() =>
+        {
+            if (_canvasWindow != null && !_canvasWindow.IsClosed)
+                _canvasWindow.SetTrustedGatewayOrigin(null);
+        });
     }
     
     private void OnPairingStatusChanged(object? sender, PairingStatusEventArgs args)
