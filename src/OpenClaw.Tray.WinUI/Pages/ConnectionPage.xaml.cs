@@ -930,18 +930,37 @@ public sealed partial class ConnectionPage : Page
 
             if (showSurfaces && settings is not null)
             {
+                var activeGateway = _gatewayRegistry?.GetActive();
+                var hasSharedGatewayToken = !string.IsNullOrWhiteSpace(
+                    activeGateway?.SharedGatewayToken);
+                // Same manager NodeState signal as app.connection.* / Command Center.
+                var nodeSessionLive = BrowserProxyActivation.IsNodeSessionLive(
+                    _connectionManager?.CurrentSnapshot.NodeState
+                        ?? OpenClaw.Connection.RoleConnectionState.Idle);
+                // Match Command Center CaptureSnapshot: active record URL, else settings.
+                var requiresRemoteBrowserEndpoint =
+                    BrowserProxyActivation.RequiresRemoteBrowserEndpoint(
+                        gatewayUrl: activeGateway?.Url ?? settings.GatewayUrl,
+                        browserControlPort: activeGateway?.BrowserControlPort,
+                        sshTunnel: activeGateway?.SshTunnel);
                 var pillFp = BuildCapabilityPillFingerprint(
                     plan.NodeCard,
                     plan.NodeEffectiveCapabilities,
                     plan.NodePendingDeclaredCapabilities,
-                    settings);
+                    settings,
+                    hasSharedGatewayToken,
+                    nodeSessionLive,
+                    requiresRemoteBrowserEndpoint);
                 if (_capabilityPillsFingerprint != pillFp)
                 {
                     _capabilityPillsFingerprint = pillFp;
                     NodeCapabilityPillsHost.Child = BuildCapabilityPills(
                         plan.NodeEffectiveCapabilities,
                         plan.NodePendingDeclaredCapabilities,
-                        settings);
+                        settings,
+                        hasSharedGatewayToken,
+                        nodeSessionLive,
+                        requiresRemoteBrowserEndpoint);
                 }
 
                 NodeCapabilityPillsHost.Visibility =
@@ -1194,12 +1213,15 @@ public sealed partial class ConnectionPage : Page
         return new Border { Child = grid };
     }
 
-    private enum CapabilityPillState { Active, Pending, Off }
+    private enum CapabilityPillState { Active, Pending, NeedsSharedToken, Off }
 
     private WrapPanel BuildCapabilityPills(
         IReadOnlyList<string> effective,
         IReadOnlyList<string> pendingDeclared,
-        SettingsManager settings)
+        SettingsManager settings,
+        bool hasSharedGatewayToken,
+        bool nodeSessionLive,
+        bool requiresRemoteBrowserEndpoint)
     {
         var panel = new WrapPanel { HorizontalSpacing = 6, VerticalSpacing = 6 };
         var effectiveSet = new HashSet<string>(
@@ -1224,12 +1246,36 @@ public sealed partial class ConnectionPage : Page
         var shown = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (name, labelKey, glyph, enabled) in canonical)
         {
-            var state = effectiveSet.Contains(name)
-                ? CapabilityPillState.Active
-                : (pendingSet.Contains(name) || enabled)
-                    ? CapabilityPillState.Pending
-                    : CapabilityPillState.Off;
-            panel.Children.Add(MakeCapabilityPill(LocalizationHelper.GetString(labelKey), glyph, state, isHighContrast));
+            var kind = name.Equals("browser", StringComparison.OrdinalIgnoreCase)
+                ? BrowserProxyActivation.ResolveCapabilityPillKind(
+                    toggleEnabled: enabled,
+                    effective: effectiveSet.Contains(name),
+                    pendingDeclared: pendingSet.Contains(name),
+                    hasSharedGatewayToken: hasSharedGatewayToken,
+                    nodeSessionLive: nodeSessionLive)
+                : effectiveSet.Contains(name)
+                    ? BrowserProxyActivation.CapabilityPillKind.Active
+                    : (pendingSet.Contains(name) || enabled)
+                        ? BrowserProxyActivation.CapabilityPillKind.PendingApproval
+                        : BrowserProxyActivation.CapabilityPillKind.Off;
+            var state = kind switch
+            {
+                BrowserProxyActivation.CapabilityPillKind.Active => CapabilityPillState.Active,
+                BrowserProxyActivation.CapabilityPillKind.NeedsSharedToken => CapabilityPillState.NeedsSharedToken,
+                BrowserProxyActivation.CapabilityPillKind.PendingApproval => CapabilityPillState.Pending,
+                _ => CapabilityPillState.Off,
+            };
+            var remoteForPill = name.Equals("browser", StringComparison.OrdinalIgnoreCase) &&
+                                kind == BrowserProxyActivation.CapabilityPillKind.NeedsSharedToken
+                ? requiresRemoteBrowserEndpoint
+                : false;
+            panel.Children.Add(MakeCapabilityPill(
+                LocalizationHelper.GetString(labelKey),
+                glyph,
+                state,
+                isHighContrast,
+                kind,
+                remoteForPill));
             shown.Add(name);
         }
 
@@ -1245,7 +1291,15 @@ public sealed partial class ConnectionPage : Page
                 "system" => (LocalizationHelper.GetString("ConnectionPage_NodeCap_System"), FluentIconCatalog.System),
                 _ => (HumanizeNodeToken(name), FluentIconCatalog.System),
             };
-            panel.Children.Add(MakeCapabilityPill(label, glyph, state, isHighContrast));
+            panel.Children.Add(MakeCapabilityPill(
+                label,
+                glyph,
+                state,
+                isHighContrast,
+                kind: state == CapabilityPillState.Active
+                    ? BrowserProxyActivation.CapabilityPillKind.Active
+                    : BrowserProxyActivation.CapabilityPillKind.PendingApproval,
+                requiresRemoteBrowserEndpoint: false));
         }
 
         return panel;
@@ -1253,7 +1307,13 @@ public sealed partial class ConnectionPage : Page
 
     private const double CapabilityPillFillOpacity = 0.14;
 
-    private Border MakeCapabilityPill(string label, string glyph, CapabilityPillState state, bool isHighContrast)
+    private Border MakeCapabilityPill(
+        string label,
+        string glyph,
+        CapabilityPillState state,
+        bool isHighContrast,
+        BrowserProxyActivation.CapabilityPillKind kind,
+        bool requiresRemoteBrowserEndpoint)
     {
         var (fillBrush, iconBrush, textBrush, stateKey, stateGlyph) = state switch
         {
@@ -1276,6 +1336,16 @@ public sealed partial class ConnectionPage : Page
                 ResolveBrush("SystemFillColorCautionBrush"),
                 ResolveBrush("SystemFillColorCautionBrush"),
                 "ConnectionPage_NodePillState_Pending",
+                FluentIconCatalog.StatusWarn),
+            CapabilityPillState.NeedsSharedToken => (
+                TintBrush(
+                    "SystemFillColorCriticalBrush",
+                    "SystemFillColorCriticalBackgroundBrush",
+                    CapabilityPillFillOpacity,
+                    isHighContrast),
+                ResolveBrush("SystemFillColorCriticalBrush"),
+                ResolveBrush("SystemFillColorCriticalBrush"),
+                "ConnectionPage_NodePillState_NeedsGatewayToken",
                 FluentIconCatalog.StatusWarn),
             _ => (
                 ResolveBrush("SubtleFillColorTertiaryBrush"),
@@ -1303,6 +1373,10 @@ public sealed partial class ConnectionPage : Page
         content.Children.Add(capabilityIcon);
 
         var stateText = LocalizationHelper.GetString(stateKey);
+        var detailText = BrowserProxyActivation.ResolveCapabilityPillTooltip(
+            kind,
+            stateText,
+            requiresRemoteBrowserEndpoint);
         var labelText = new TextBlock
         {
             Text = label,
@@ -1310,7 +1384,7 @@ public sealed partial class ConnectionPage : Page
             Foreground = textBrush,
             VerticalAlignment = VerticalAlignment.Center,
         };
-        AutomationProperties.SetName(labelText, $"{label}: {stateText}");
+        AutomationProperties.SetName(labelText, $"{label}: {detailText}");
         content.Children.Add(labelText);
 
         if (stateGlyph != null)
@@ -1334,7 +1408,7 @@ public sealed partial class ConnectionPage : Page
             Background = fillBrush,
             Child = content,
         };
-        ToolTipService.SetToolTip(pill, stateText);
+        ToolTipService.SetToolTip(pill, detailText);
         return pill;
     }
 
@@ -1366,7 +1440,10 @@ public sealed partial class ConnectionPage : Page
         NodeCardState state,
         IReadOnlyList<string> effective,
         IReadOnlyList<string> pendingDeclared,
-        SettingsManager settings)
+        SettingsManager settings,
+        bool hasSharedGatewayToken,
+        bool nodeSessionLive,
+        bool requiresRemoteBrowserEndpoint)
     {
         var eff = string.Join(
             ",",
@@ -1384,7 +1461,7 @@ public sealed partial class ConnectionPage : Page
             settings.NodeLocationEnabled ? '1' : '0',
             settings.NodeTtsEnabled ? '1' : '0',
             settings.NodeSttEnabled ? '1' : '0');
-        return $"{state}|{eff}|{pend}|{toggles}";
+        return $"{state}|{eff}|{pend}|{toggles}|{(hasSharedGatewayToken ? '1' : '0')}|{(nodeSessionLive ? '1' : '0')}|{(requiresRemoteBrowserEndpoint ? '1' : '0')}";
     }
 
     /// <summary>
