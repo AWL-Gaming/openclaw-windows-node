@@ -31,6 +31,7 @@ public sealed record ReactorChatTimelineProps(
     Action<string>? OnSuggestionPicked = null,
     bool SuggestionsDisabled = false,
     ReactorChatIdentity? AssistantIdentity = null,
+    Action<string>? OnOpenCheckpoints = null,
     long HistoryRevision = 0);
 
 public sealed record ReactorChatIdentity(
@@ -415,8 +416,8 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
         ChatTimelineItemKind.ToolCall => BuildTool(row, entry),
         ChatTimelineItemKind.Reasoning => BuildReasoning(entry),
         ChatTimelineItemKind.PermissionRequest => BuildPermission(row, entry),
-        ChatTimelineItemKind.Status => BuildStatus(entry),
-        _ => BuildStatus(entry),
+        ChatTimelineItemKind.Status => BuildStatus(row, entry),
+        _ => BuildGenericStatus(entry),
     };
 
     private static Element BuildUser(
@@ -925,7 +926,23 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
             .BorderThickness(1));
     }
 
-    private static Element BuildStatus(ChatTimelineItem entry)
+    private static Element BuildStatus(ReactorTimelineRow row, ChatTimelineItem entry)
+    {
+        var presentation = ChatCompactionPresenter.TryCreateForEntry(
+            entry,
+            row.Props.Timeline.EntryMetadata,
+            LocalizedOrDefault("Chat_Compaction_Title", "COMPACTED HISTORY"),
+            LocalizedOrDefault(
+                "Chat_Compaction_FallbackDetail",
+                "The compacted transcript is preserved as a checkpoint. " +
+                "Open session checkpoints to branch or restore from that compacted view."),
+            LocalizedOrDefault("Chat_Compaction_OpenCheckpoints", "Open checkpoints"));
+        return presentation is null
+            ? BuildGenericStatus(entry)
+            : BuildCompaction(row, presentation);
+    }
+
+    private static Element BuildGenericStatus(ChatTimelineItem entry)
     {
         var isError = entry.Tone == ChatTone.Error;
         return Border(Text(
@@ -947,6 +964,41 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
                     isError ? (byte)0xC8 : (byte)0x80,
                     isError ? (byte)0x32 : (byte)0x80,
                     isError ? (byte)0x32 : (byte)0x80)));
+    }
+
+    private static Element BuildCompaction(
+        ReactorTimelineRow row,
+        ChatCompactionPresentation presentation)
+    {
+        var sessionKey = row.Props.Timeline.SessionId;
+        var canOpenCheckpoints = !string.IsNullOrWhiteSpace(sessionKey)
+            && row.Props.OnOpenCheckpoints is not null;
+        return Border(
+                VStack(
+                    8,
+                    Text(presentation.Title, 13, FontWeights.SemiBold)
+                        .HAlign(HorizontalAlignment.Center),
+                    Text(presentation.Detail, 12, FontWeights.Normal, "TextFillColorSecondaryBrush")
+                        .Set(text => text.TextAlignment = TextAlignment.Center)
+                        .HAlign(HorizontalAlignment.Center),
+                    Button(
+                            presentation.ActionLabel,
+                            () =>
+                            {
+                                if (canOpenCheckpoints)
+                                    row.Props.OnOpenCheckpoints!(sessionKey!);
+                            })
+                        .IsEnabled(canOpenCheckpoints)
+                        .HAlign(HorizontalAlignment.Center)
+                        .AutomationName(presentation.ActionLabel)))
+            .Margin(36, 8, 24, 8)
+            .Padding(16, 10)
+            .HAlign(HorizontalAlignment.Stretch)
+            .CornerRadius(8)
+            .Background(Theme.Ref("CardBackgroundFillColorDefaultBrush"))
+            .BorderBrush(Theme.Ref("ControlStrokeColorDefaultBrush"))
+            .BorderThickness(1)
+            .AutomationName(presentation.AutomationName);
     }
 
     private static Element Footer(

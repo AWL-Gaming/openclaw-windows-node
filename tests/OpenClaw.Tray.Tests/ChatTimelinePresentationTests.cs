@@ -317,4 +317,25 @@ public sealed class ChatTimelinePresentationTests
         Assert.Contains("ChatTimelineAssistantRuns.Describe(orderedEntries)", timeline);
         Assert.Contains("includeMetadata: row.IsAssistantRunEnd", timeline);
     }
+
+    [Fact]
+    public void ReactorTimeline_RendersStructuredCompactionCard()
+    {
+        var timeline = File.ReadAllText(Path.Combine(
+            TestRepositoryPaths.GetRepositoryRoot(),
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Chat",
+            "ReactorChatTimeline.cs"));
+
+        Assert.Contains("ChatTimelineItemKind.Status => BuildStatus(row, entry)", timeline);
+        Assert.Contains("ChatCompactionPresenter.TryCreateForEntry(", timeline);
+        Assert.Contains("Chat_Compaction_Title", timeline);
+        Assert.Contains("Chat_Compaction_FallbackDetail", timeline);
+        Assert.Contains("Chat_Compaction_OpenCheckpoints", timeline);
+        Assert.Contains("row.Props.OnOpenCheckpoints!(sessionKey!)", timeline);
+        Assert.Contains(".BorderThickness(1)", timeline);
+        Assert.DoesNotContain("ReactorChatComposer.IsHighContrast", timeline);
+        Assert.Contains(".AutomationName(presentation.AutomationName)", timeline);
+    }
 }
