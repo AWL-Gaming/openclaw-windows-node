@@ -740,6 +740,8 @@ public sealed class PreflightPortStep : SetupStep
 
 public sealed class CreateWslInstanceStep : SetupStep
 {
+    private static readonly TimeSpan DistroVersionVerificationTimeout = TimeSpan.FromMinutes(1);
+
     public override string Id => "wsl-create";
     public override string DisplayName => "Create WSL instance";
     public override bool CanRetry => false;
@@ -832,7 +834,11 @@ public sealed class CreateWslInstanceStep : SetupStep
             return StepResult.Fail(environmentIssue != null ? $"{baseMessage} {environmentIssue}" : baseMessage);
         }
 
-        var verbose = await ctx.Commands.RunAsync(WslConstants.WslExePath, ["--list", "--verbose"], TimeSpan.FromSeconds(15), ct: ct);
+        var verbose = await ctx.Commands.RunAsync(
+            WslConstants.WslExePath,
+            ["--list", "--verbose"],
+            DistroVersionVerificationTimeout,
+            ct: ct);
         if (verbose.ExitCode != 0 || !WslInstallSupport.TryGetDistroVersion(verbose.Stdout, distro, out var version))
             return StepResult.Fail($"Fresh WSL install registered '{distro}', but setup could not verify it is WSL2.");
 
