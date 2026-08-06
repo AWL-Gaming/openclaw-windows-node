@@ -1,9 +1,13 @@
 # OpenClaw Gateway ↔ Windows Node Integration Guide
 
-> Last updated: 2026-04-26
-> Source of truth: [`openclaw/openclaw` — `src/gateway/node-command-policy.ts`](https://github.com/openclaw/openclaw/blob/main/src/gateway/node-command-policy.ts)
+> Last reviewed for the end-to-end FAQ: 2026-08-06
+> Source audited at: [`openclaw/openclaw` commit `db90dff`](https://github.com/openclaw/openclaw/blob/db90dff1396fecbf7029e9e9ea19d6c6ca3e644e/src/gateway/node-command-policy.ts)
 
 This document captures everything we've learned about how the OpenClaw gateway handles node commands, platform allowlists, and the QR bootstrap pairing flow. It exists because these details are not obvious from the docs alone and caused real debugging sessions.
+
+For operator versus node roles, exec approvals, shell wrapping, protocol
+versioning, and Windows MXC, see the
+[Gateway, node, and exec flow FAQ](OPENCLAW_GATEWAY_NODE_EXEC_FAQ.md).
 
 ---
 

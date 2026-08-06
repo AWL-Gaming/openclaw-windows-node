@@ -1,6 +1,12 @@
 # 🏗️ Architecture: Windows Platform Strategy & Native Node Roadmap
 
-> **📝 Note**: This document was written during the initial planning phase (early 2026). Windows Node mode has since been implemented with canvas, screen, camera, system.run, and notification capabilities. The deployment scenarios, design rationale, and protocol details remain accurate reference material. The "Current State" table and roadmap checkboxes may not reflect the latest status — see README.md for current capabilities.
+> **📝 Note**: This document was written during the initial planning phase
+> (early 2026). Windows Node mode has since been implemented with canvas,
+> screen, camera, `system.run`, and notification capabilities. Treat roadmap
+> prose and code sketches as historical context. Use the
+> [Gateway, node, and exec flow FAQ](OPENCLAW_GATEWAY_NODE_EXEC_FAQ.md) for the
+> current end-to-end execution and authority model, and README.md for the
+> current capability list.
 
 ## Summary
 
@@ -432,28 +438,33 @@ ToastNotificationManager.CreateToastNotifier("OpenClaw.Tray").Show(toast);
 
 The tray app *already does* toast notifications from gateway events. The change is to also handle `system.notify` commands from the node protocol so the agent can *request* a notification.
 
-### System Exec → Process.Start
+### System Exec: canonical argv, local approval, and MXC
 
-```csharp
-// system.run
-var process = new Process {
-    StartInfo = new ProcessStartInfo {
-        FileName = "powershell.exe",
-        Arguments = $"-Command \"{command}\"",
-        RedirectStandardOutput = true,
-        RedirectStandardError = true,
-        UseShellExecute = false,
-        CreateNoWindow = true,
-        WorkingDirectory = cwd
-    }
-};
-process.Start();
-string stdout = await process.StandardOutput.ReadToEndAsync();
-string stderr = await process.StandardError.ReadToEndAsync();
-await process.WaitForExitAsync();
+The earlier PowerShell-only sketch is no longer the implementation. The current
+path is:
+
+```text
+node.invoke system.run
+  -> local Run system tools gate
+  -> Windows V2 exec approval
+  -> resolved absolute executable + canonical argv
+  -> MXC AppContainer, strict deny, or approved host fallback
+  -> Process.Start with UseShellExecute=false
 ```
 
-**Critical:** Exec approvals must be enforced locally, same as macOS/headless nodes. The default store is `%APPDATA%\OpenClawTray\exec-approvals.json`; `OPENCLAW_STATE_DIR` overrides that location.
+The normal upstream `exec host=node` path is still shell-oriented. The gateway
+builds platform argv such as `cmd.exe /d /s /c <command>` for Windows before it
+calls `system.run`. It calls `system.run.prepare` first only when gateway policy
+requires approval or strict inline-eval review. A low-level caller can instead
+send direct argv. In that case, Windows resolves `argv[0]` to an absolute
+executable and passes arguments through `ProcessStartInfo.ArgumentList` without
+adding another shell.
+
+Exec approvals are enforced locally, as they are for macOS and headless nodes.
+The default store is `%APPDATA%\OpenClawTray\exec-approvals.json`;
+`OPENCLAW_STATE_DIR` overrides that location. See the
+[exec flow FAQ](OPENCLAW_GATEWAY_NODE_EXEC_FAQ.md#what-exactly-happens-inside-the-windows-node-for-systemrun)
+for gateway-owned approval, node-local approval, and sandbox ordering.
 
 #### Decision: retire Windows V1 exec policy without migration
 
@@ -498,6 +509,9 @@ Migration example:
 The node returns `command-array-required` for a string command and
 `custom-env-not-supported` for a non-empty environment. This explicit boundary
 keeps approval identity and process execution on one argv representation.
+
+`"version": 1` inside `exec-approvals.json` is the persisted file schema
+version. It is not the retired Windows V1 `exec-policy.json` evaluator.
 
 ### Location → Windows.Devices.Geolocation
 

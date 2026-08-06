@@ -37,6 +37,8 @@ This monorepo contains the Windows hub, shared client libraries, and CLI utiliti
 > **Managed WSL gateway?** Local setup creates a locked-down app-owned `OpenClawGateway` distro. See [docs/WSL_GATEWAY_ADMIN.md](docs/WSL_GATEWAY_ADMIN.md) for editing `openclaw.json` as the `openclaw` user and using root for protected-file administration.
 >
 > **Operator or node?** Start with [Operator and node concepts](docs/OPERATOR_NODE_CONCEPTS.md) for the beginner-facing glossary of gateway, operator, node, pairing, reapproval, and allowlisted node capabilities.
+>
+> **Tracing a request or exec approval?** Use the [Gateway, node, and exec flow FAQ](docs/OPENCLAW_GATEWAY_NODE_EXEC_FAQ.md) for diagrams and evidence-backed routing, policy, shell, protocol, and sandbox details.
 
 Direct downloads from the latest OpenClaw Windows release:
 
@@ -225,7 +227,7 @@ These features are available in Windows but not in the Mac app:
 
 ### 🔌 Node Mode (Agent Control)
 
-If the operator/node split is new to you, read [Operator and node concepts](docs/OPERATOR_NODE_CONCEPTS.md) before enabling Node Mode.
+If the operator/node split is new to you, read [Operator and node concepts](docs/OPERATOR_NODE_CONCEPTS.md) before enabling Node Mode. For the complete command path, see the [Gateway, node, and exec flow FAQ](docs/OPENCLAW_GATEWAY_NODE_EXEC_FAQ.md).
 
 When Node Mode is enabled in Settings, your Windows PC becomes a **node** that the OpenClaw agent can control - just like the Mac app! The agent can:
 

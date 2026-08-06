@@ -1,6 +1,12 @@
 # Data Flow Architecture
 
-This document describes how gateway data flows from the WebSocket connection to the UI — the observable application model, event handling, and page update patterns.
+This document describes how gateway data flows from the WebSocket connection to
+the UI: the observable application model, event handling, and page update
+patterns.
+
+It does not describe agent tool routing, `exec`, `node.invoke`, or node-local
+approval and sandboxing. For that end-to-end path, see the
+[Gateway, node, and exec flow FAQ](OPENCLAW_GATEWAY_NODE_EXEC_FAQ.md).
 
 ## Overview
 

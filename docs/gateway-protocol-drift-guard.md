@@ -2,6 +2,11 @@
 
 > Source of truth: [`openclaw/openclaw` — `packages/gateway-protocol/src/schema/{sessions,commands}.ts`](https://github.com/openclaw/openclaw/tree/main/packages/gateway-protocol/src/schema)
 
+This guard covers a protocol subset, not protocol negotiation or gateway release
+pinning. See the
+[Gateway, node, and exec flow FAQ](OPENCLAW_GATEWAY_NODE_EXEC_FAQ.md#are-we-pinned-to-a-gateway-protocol-version-or-a-gateway-release)
+for those separate version axes.
+
 ## Why this exists
 
 The Windows companion can silently drift from the upstream OpenClaw gateway

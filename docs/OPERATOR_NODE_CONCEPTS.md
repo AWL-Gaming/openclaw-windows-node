@@ -4,6 +4,9 @@ OpenClaw Companion connects a Windows PC to an OpenClaw gateway in two separate
 roles. A new install can use both roles at once, but they have different jobs and
 different approval paths.
 
+For the complete request, exec approval, protocol, and sandbox flow, see the
+[Gateway, node, and exec flow FAQ](OPENCLAW_GATEWAY_NODE_EXEC_FAQ.md).
+
 ## Quick Glossary
 
 | Term | Meaning |
@@ -80,3 +83,6 @@ stricter checks.
   and allowlist examples.
 - Read [Connection architecture](CONNECTION_ARCHITECTURE.md) for contributor
   details about token precedence, pairing, and connection lifecycle.
+- Use the [Gateway, node, and exec flow FAQ](OPENCLAW_GATEWAY_NODE_EXEC_FAQ.md)
+  when tracing a request across agent, gateway, approval, node, and sandbox
+  boundaries.
