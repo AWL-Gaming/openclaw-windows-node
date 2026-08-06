@@ -312,6 +312,108 @@ The `system.run` boundary and execution call are in
 The approval pipeline and execution-boundary revalidation are in
 [`ExecApprovalsCoordinator.cs`](https://github.com/openclaw/openclaw-windows-node/blob/d7d153ca5d409487e06ef584b1de1184520e90e6/src/OpenClaw.Shared/ExecApprovals/ExecApprovalsCoordinator.cs#L47-L389).
 
+## What is exec host policy, who chooses it, and how are policies combined?
+
+Exec host policy answers two separate questions:
+
+1. **Where may this shell command run?** The resolved host is `sandbox`,
+   `gateway`, or one selected `node`.
+2. **What approval posture applies on that host?** The effective values are
+   `security`, `ask`, `askFallback`, and the applicable allowlist.
+
+The gateway agent runtime resolves the host from `tools.exec.host`, any
+authorized session `/exec` override, and the tool request:
+
+- `host=auto` selects the active agent sandbox when one exists, otherwise the
+  gateway;
+- a node is selected only by explicit `host=node` routing or a configured node
+  default;
+- an explicit gateway escape from an active sandbox is not a free override and
+  must satisfy the elevated-access rules.
+
+The persisted gateway-side policy knob is `tools.exec.mode`, globally or per
+agent. It maps to `security` and `ask`:
+
+| Mode | Security | Ask |
+| --- | --- | --- |
+| `deny` | `deny` | `off` |
+| `allowlist` | `allowlist` | `off` |
+| `ask` | `allowlist` | `on-miss` |
+| `auto` | `allowlist` | `on-miss`, with native auto-review before human fallback |
+| `full` | `full` | `off` |
+
+The selected execution host also has its own approvals document. The gateway
+combines the requested config/session policy with that host document
+**field-by-field to the stricter result**:
+
+```text
+effective security    = stricter(requested security, host security)
+effective ask         = stricter(requested ask, host ask)
+effective askFallback = stricter(effective security, host askFallback)
+```
+
+In source, this is `minSecurity`, `maxAsk`, and `minSecurity`. The enum ordering
+makes `deny` stricter than `allowlist`, which is stricter than `full`; and
+`always` is stricter than `on-miss`, which is stricter than `off`.
+
+This means:
+
+- config can request a restrictive posture that the host file cannot loosen;
+- the host owner can tighten policy without rewriting gateway config;
+- no later value wins merely because the command flowed past it;
+- a permissive setting at one layer never cancels a denial at another layer.
+
+Within one approvals document, scalar fields use a specificity cascade:
+
+```text
+agent entry -> wildcard "*" entry -> defaults -> system defaults
+```
+
+The first defined scalar wins in that cascade. Allowlists are the one additive
+case: wildcard and agent-specific entries are combined, normalized, and then
+matched. That local allowlist combination still cannot override an effective
+`security=deny`, an `ask=always` requirement, or a denial at another boundary.
+
+For `host=node`, there is an additional boundary. The gateway first applies its
+effective `host=node` policy and the gateway node-command gates. The selected
+node then applies its own local policy again. These are **sequential AND gates**,
+not a merged union:
+
+| Gateway result | Node result | Outcome |
+| --- | --- | --- |
+| Deny | Not reached | Denied by gateway |
+| Allow | Deny | Denied by node |
+| Allow after gateway approval | Local approval required | Node may show a second, independent prompt |
+| Allow | Allow | Execute, subject to sandbox and process constraints |
+
+The gateway can fetch a compatible node's policy snapshot during
+`system.run.prepare` and use stricter node values when deciding whether its own
+approval is required. That is an early conservative check, not delegation of
+the node's authority. The node still evaluates live local policy at execution
+time. If the node policy is unknown, the gateway approval path treats it
+conservatively; the default gateway `full`/`off` fast path can still dispatch
+directly, after which the node remains the decisive local gate.
+
+### Who can edit each layer?
+
+| Layer | Typical editor | Scope and limits |
+| --- | --- | --- |
+| `tools.exec.host` and `tools.exec.mode` | Gateway owner or scoped administrator through config/CLI/Control UI | Global or per-agent requested policy. |
+| Session `/exec` defaults | An authorized sender for that session | Session-only. Does not rewrite the host approvals document. |
+| Gateway-host approvals | Gateway machine owner, or an authorized operator using gateway approval APIs | Local to the gateway execution host. |
+| Node-host approvals | Node machine owner; an authorized operator through `openclaw approvals set --node` when supported | Local to that node. |
+| Windows V2 approvals | Windows owner through Companion settings and attended prompts | Windows is authoritative. Remote updates require compare-and-swap and may tighten, but cannot add allowlist grants or loosen policy. |
+| Sandbox access policy | Owner of the selected sandbox or Windows node settings | Applied after routing and approval; can still prevent filesystem, network, clipboard, or UI access. |
+
+**Evidence:** upstream policy merging is implemented in
+[`bash-tools.exec-host-shared.ts`](https://github.com/openclaw/openclaw/blob/db90dff1396fecbf7029e9e9ea19d6c6ca3e644e/src/agents/bash-tools.exec-host-shared.ts)
+and documented in
+[`docs/tools/exec.md`](https://github.com/openclaw/openclaw/blob/db90dff1396fecbf7029e9e9ea19d6c6ca3e644e/docs/tools/exec.md)
+and
+[`docs/tools/exec-approvals.md`](https://github.com/openclaw/openclaw/blob/db90dff1396fecbf7029e9e9ea19d6c6ca3e644e/docs/tools/exec-approvals.md).
+The Windows scalar cascade and additive wildcard/agent allowlists are in
+[`ExecApprovalsStore.cs`](https://github.com/openclaw/openclaw-windows-node/blob/d7d153ca5d409487e06ef584b1de1184520e90e6/src/OpenClaw.Shared/ExecApprovals/ExecApprovalsStore.cs#L787-L835).
+
 ## Why are there both gateway and node exec approvals?
 
 They protect different authority boundaries.
