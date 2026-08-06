@@ -736,6 +736,29 @@ public class ChatTimelineReducerTests
     }
 
     [Fact]
+    public void RebuildActiveToolTracking_PreservesRunScopedCorrelationKeys()
+    {
+        var state = ChatTimelineReducer.Apply(
+            ChatTimelineState.Initial(),
+            new ChatToolStartEvent("first", "Bash", ToolCallId: "tool-1", RunId: "run-1"));
+        state = ChatTimelineReducer.Apply(
+            state,
+            new ChatToolStartEvent("second", "Apply Patch", ToolCallId: "tool-1", RunId: "run-2"));
+        state = state with
+        {
+            ActiveToolCallId = null,
+            ActiveToolCalls =
+                System.Collections.Immutable.ImmutableDictionary<ChatToolCorrelationKey, string>.Empty,
+        };
+
+        var rebuilt = ChatTimelineReducer.RebuildActiveToolTracking(state);
+
+        Assert.Equal(state.Entries[1].Id, rebuilt.ActiveToolCallId);
+        Assert.Equal(state.Entries[0].Id, rebuilt.ActiveToolCalls[new("run-1", 0, "tool-1")]);
+        Assert.Equal(state.Entries[1].Id, rebuilt.ActiveToolCalls[new("run-2", 0, "tool-1")]);
+    }
+
+    [Fact]
     public void ToolCalls_LegacyActiveReplayDedupesButTerminalReuseDoesNot()
     {
         var state = ChatTimelineReducer.Apply(

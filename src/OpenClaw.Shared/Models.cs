@@ -1802,6 +1802,21 @@ public class ChatMessageInfo
     public string Text { get; set; } = "";
 
     /// <summary>
+    /// Structured tool call/result blocks retained from array-valued message
+    /// content so native clients can correlate inputs with outputs.
+    /// </summary>
+    public IReadOnlyList<ChatToolContentInfo> ToolContent { get; set; } =
+        Array.Empty<ChatToolContentInfo>();
+
+    /// <summary>
+    /// Ordered text and tool blocks retained from array-valued message content.
+    /// Flat <see cref="Text"/> and <see cref="ToolContent"/> remain populated for
+    /// compatibility with consumers that do not need block-level chronology.
+    /// </summary>
+    public IReadOnlyList<ChatMessageContentPartInfo> ContentParts { get; set; } =
+        Array.Empty<ChatMessageContentPartInfo>();
+
+    /// <summary>
     /// Optional gateway-assigned message state. "final" indicates a complete
     /// terminal message; absent or other values indicate intermediate state.
     /// </summary>
@@ -1856,6 +1871,35 @@ public class ChatMessageInfo
     /// Only present on assistant messages in <c>chat.history</c>.
     /// </summary>
     public string? StopReason { get; set; }
+}
+
+public enum ChatToolContentKind
+{
+    Call,
+    Result,
+}
+
+public class ChatToolContentInfo
+{
+    public ChatToolContentKind Kind { get; set; }
+    public string? CallId { get; set; }
+    public string ToolName { get; set; } = "tool";
+    public JsonElement? Args { get; set; }
+    public string? Text { get; set; }
+    public bool IsError { get; set; }
+}
+
+public enum ChatMessageContentPartKind
+{
+    Text,
+    Tool,
+}
+
+public class ChatMessageContentPartInfo
+{
+    public ChatMessageContentPartKind Kind { get; set; }
+    public string? Text { get; set; }
+    public ChatToolContentInfo? Tool { get; set; }
 }
 
 /// <summary>

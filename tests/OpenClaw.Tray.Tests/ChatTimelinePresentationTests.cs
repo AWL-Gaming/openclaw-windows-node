@@ -302,7 +302,7 @@ public sealed class ChatTimelinePresentationTests
     }
 
     [Fact]
-    public void ReactorTimeline_GroupsAssistantRunsInPresentationOrder()
+    public void ReactorTimeline_ProjectsActivityInSourceChronology()
     {
         var timeline = File.ReadAllText(Path.Combine(
             TestRepositoryPaths.GetRepositoryRoot(),
@@ -311,11 +311,63 @@ public sealed class ChatTimelinePresentationTests
             "Chat",
             "ReactorChatTimeline.cs"));
 
-        Assert.Contains(
-            "var orderedEntries = OrderEntriesForPresentation(props.Timeline.Entries);",
-            timeline);
-        Assert.Contains("ChatTimelineAssistantRuns.Describe(orderedEntries)", timeline);
+        Assert.Contains("var chronologicalEntries = props.Timeline.Entries;", timeline);
+        Assert.Contains("ChatToolActivityPresentation.Project(", timeline);
+        Assert.Contains("ChatTimelineAssistantRuns.Describe(chronologicalEntries)", timeline);
+        Assert.DoesNotContain("OrderEntriesForPresentation", timeline);
         Assert.Contains("includeMetadata: row.IsAssistantRunEnd", timeline);
+    }
+
+    [Fact]
+    public void ReactorTimeline_UsesCanonicalToolActivityKeyForStandaloneAndGroupedRows()
+    {
+        var timeline = File.ReadAllText(Path.Combine(
+            TestRepositoryPaths.GetRepositoryRoot(),
+            "src", "OpenClaw.Tray.WinUI", "Chat", "ReactorChatTimeline.cs"));
+
+        Assert.Contains("entry.Kind == ChatTimelineItemKind.ToolCall", timeline);
+        Assert.Contains("ChatToolActivityPresentation.ActivityKey(", timeline);
+        Assert.Contains("ReactorChatTimeline.RowKey(props.Timeline, entry)", timeline);
+    }
+
+    [Fact]
+    public void ReactorTimeline_DelegatesToolAndActivityRenderingToFocusedOwner()
+    {
+        var timeline = File.ReadAllText(Path.Combine(
+            TestRepositoryPaths.GetRepositoryRoot(),
+            "src", "OpenClaw.Tray.WinUI", "Chat", "ReactorChatTimeline.cs"));
+        var renderer = File.ReadAllText(Path.Combine(
+            TestRepositoryPaths.GetRepositoryRoot(),
+            "src", "OpenClaw.Tray.WinUI", "Chat", "ToolCallCardRenderer.cs"));
+
+        Assert.Contains("ToolCallCardRenderer.BuildStandalone", timeline);
+        Assert.Contains("ToolCallCardRenderer.BuildActivity", timeline);
+        Assert.DoesNotContain("private static Element BuildTool", timeline);
+        Assert.Contains("public static Element BuildStandalone", renderer);
+        Assert.Contains("public static Element BuildActivity", renderer);
+        Assert.Contains("FormatToolDisplayArgs(entry.ToolArgs)", renderer);
+        Assert.Contains("private const int ToolDetailMaxChars = 4000;", renderer);
+        Assert.Contains("\"Chat_Tool_InputSection\"", renderer);
+        Assert.Contains("\"Chat_Tool_OutputLabel\"", renderer);
+        Assert.Contains(".Padding(18, 8, 18, 10)", renderer);
+        Assert.Contains("var body = RichTextBlock(content)", renderer);
+        Assert.Contains(".MaxHeight(240)", renderer);
+        Assert.Contains("text.IsTextSelectionEnabled = true", renderer);
+        Assert.DoesNotContain("var stateText =", renderer);
+        Assert.DoesNotContain("var glyph =", renderer);
+        Assert.Contains("AutomationProperties.SetAutomationId(", renderer);
+        Assert.Contains("ChatToolActivity_", renderer);
+        Assert.Contains("ChatToolCall_", renderer);
+        Assert.Contains("internal sealed class ToolActivityCard : Component<ToolActivityCardProps>", renderer);
+        Assert.Contains("Element details = isExpanded", renderer);
+        Assert.Contains("? VStack(", renderer);
+        Assert.Contains("control.MinHeight = 28;", renderer);
+        Assert.Contains("control.FontSize = 12;", renderer);
+        Assert.Contains("border.BorderThickness = isNested", renderer);
+        Assert.Contains("? new Thickness(0)", renderer);
+        Assert.Contains("? \"SubtleFillColorTransparentBrush\"", renderer);
+        Assert.Contains(": Empty();", renderer);
+        Assert.DoesNotContain("activity.Tools.Select(BuildStandalone)", renderer);
     }
 
     [Fact]

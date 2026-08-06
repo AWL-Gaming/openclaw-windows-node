@@ -1165,11 +1165,22 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
 
                 bool nextAssistantIsAborted = false;
                 var attachmentMatcher = CreateAttachmentMetaMatcher(history.SessionId, threadId);
+                var pendingUnkeyedToolCalls = new Queue<string>();
+                var syntheticToolCallSequence = 0;
+                ChatMessageInfo? suppressedAbortedAssistant = null;
 
-                foreach (var msg in ordered)
+                foreach (var replayPart in ChatHistoryReplayProjection.Project(ordered))
                 {
+                    var msg = replayPart.Message;
+                    if (suppressedAbortedAssistant is not null)
+                    {
+                        if (ReferenceEquals(suppressedAbortedAssistant, msg))
+                            continue;
+                        suppressedAbortedAssistant = null;
+                    }
+
                     var roleLower = msg.Role?.ToLowerInvariant() ?? "";
-                    var rawText = msg.Text ?? string.Empty;
+                    var rawText = replayPart.Text;
                     var ts = msg.Ts > 0
                         ? DateTimeOffset.FromUnixTimeMilliseconds(msg.Ts).ToLocalTime()
                         : (DateTimeOffset?)null;
@@ -1192,8 +1203,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                     var text = TruncateForChatEntry(EscapeUntrustedAttachmentMarkerLines(rawText));
                     if (roleLower == "user")
                         text = RehydrateAttachmentMarkers(attachmentMatcher, text, msg.Ts);
-
-                    if (string.IsNullOrEmpty(text)) continue;
+                    var hasStructuredToolContent = replayPart.ToolContent.Count > 0;
 
                     // Check if this user message was aborted (persisted __openclaw.id match)
                     if (roleLower == "user")
@@ -1210,18 +1220,36 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                         !string.Equals(msg.StopReason, "toolUse", StringComparison.OrdinalIgnoreCase) &&
                         !string.Equals(msg.StopReason, "end_turn", StringComparison.OrdinalIgnoreCase);
 
-                    bool shouldMarkAborted = (roleLower == "assistant" && nextAssistantIsAborted) || gatewayAborted;
-                    if (roleLower == "assistant") nextAssistantIsAborted = false; // reset after consuming
+                    var isFirstAssistantPart = roleLower == "assistant" && replayPart.IsFirstPart;
+                    var shouldSuppressAssistant = isFirstAssistantPart
+                        && (nextAssistantIsAborted || gatewayAborted);
+                    if (isFirstAssistantPart)
+                        nextAssistantIsAborted = false;
+                    if (shouldSuppressAssistant)
+                    {
+                        Logger.Debug("[ChatHistory]   → routed: ABORTED (response was stopped)");
+                        rebuilt = ApplyAndCaptureMeta(
+                            rebuilt,
+                            new ChatStatusEvent("Response was stopped", ChatTone.Warning),
+                            msgMeta);
+                        rebuilt = ChatTimelineReducer.Apply(rebuilt, new ChatTurnEndEvent());
+                        suppressedAbortedAssistant = msg;
+                        continue;
+                    }
+
+                    if (string.IsNullOrEmpty(text) && !hasStructuredToolContent) continue;
 
                     // Diagnostic: log shape (role + length + heuristic flags) only.
                     // Never log the message text — see HIGH 4 logging audit.
                     var isFlat = NativeToolProjector.LooksLikeFlattenedToolOutput(text);
                     var isSys  = NativeToolProjector.LooksLikeSystemControlNote(text);
-                    Logger.Debug($"[ChatHistory] role='{roleLower}' len={text.Length} flat={isFlat} sys={isSys} aborted={shouldMarkAborted}");
+                    Logger.Debug($"[ChatHistory] role='{roleLower}' len={text.Length} flat={isFlat} sys={isSys}");
 
-                    switch (roleLower)
+                    if (!string.IsNullOrEmpty(text))
                     {
-                        case "user":
+                        switch (roleLower)
+                        {
+                            case "user":
                             // Approval slash commands ("/approve <slug> allow-once",
                             // "/deny <slug>") are transport, not user prose. On
                             // history replay we render them as a dim audit-trail
@@ -1236,7 +1264,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                                     rebuilt,
                                     new ChatStatusEvent(text, ChatTone.Dim),
                                     msgMeta);
-                                break;
+                                    break;
                             }
                             // System-injected notes (the gateway sometimes wraps
                             // exec result reports in ``System (untrusted): ...``
@@ -1260,25 +1288,13 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                             rebuilt = ApplyAndCaptureMeta(rebuilt, new ChatUserMessageEvent(text), msgMeta);
                             break;
 
-                        case "assistant":
+                            case "assistant":
                             if (ChatMessageInfo.IsSilentAssistantDirective(roleLower, text))
                             {
                                 Logger.Debug("[ChatHistory]   → routed: SILENT assistant directive");
-                                break;
+                                    break;
                             }
 
-                            // If this assistant response was aborted, show a placeholder
-                            // instead of the actual (partial) content.
-                            if (shouldMarkAborted)
-                            {
-                                Logger.Debug($"[ChatHistory]   → routed: ABORTED (response was stopped)");
-                                rebuilt = ApplyAndCaptureMeta(
-                                    rebuilt,
-                                    new ChatStatusEvent("Response was stopped", ChatTone.Warning),
-                                    msgMeta);
-                                rebuilt = ChatTimelineReducer.Apply(rebuilt, new ChatTurnEndEvent());
-                                break;
-                            }
                             // ── Heuristic recovery for history-flattened tool calls ──
                             // The gateway strips ``stream:"item"`` / ``command_output``
                             // detail server-side when serving ``chat.history`` —
@@ -1321,14 +1337,33 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                             }
                             Logger.Debug($"[ChatHistory]   → routed: ASSISTANT bubble (no flatten/system match)");
                             rebuilt = ApplyAndCaptureMeta(rebuilt, new ChatMessageEvent(RepairContentBlockSeams(text)), msgMeta);
-                            // End the turn so the next assistant message starts a new
-                            // entry rather than replacing this one (UpsertAssistant
-                            // upserts by ActiveAssistantId, which TurnEnd clears).
-                            rebuilt = ChatTimelineReducer.Apply(rebuilt, new ChatTurnEndEvent());
+                            if (rebuilt.ActiveToolCalls.Count > 0
+                                || rebuilt.ActiveToolCallId is not null)
+                            {
+                                // Text can be interleaved between a tool start and its
+                                // result in one array-valued history message. Preserve
+                                // tool correlation while ensuring later text becomes a
+                                // separate chronological entry.
+                                rebuilt = rebuilt with
+                                {
+                                    ActiveAssistantId = null,
+                                    ActiveReasoningId = null,
+                                };
+                            }
+                            else
+                            {
+                                // End the turn so the next assistant message starts a new
+                                // entry rather than replacing this one (UpsertAssistant
+                                // upserts by ActiveAssistantId, which TurnEnd clears).
+                                rebuilt = ChatTimelineReducer.Apply(rebuilt, new ChatTurnEndEvent());
+                            }
                             break;
 
-                        case "toolresult":
-                        case "tool_result":
+                            case "toolresult":
+                            case "tool_result":
+                                if (hasStructuredToolContent)
+                                    break;
+
                             // Verified empirically — gateway 2026.4.x emits
                             // ``role: "toolresult"`` for shell/exec tool output
                             // in chat.history (not the spec's ``"tool"``).
@@ -1358,10 +1393,10 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                                         RunId: cached?.RunId),
                                     msgMeta);
                             }
-                            break;
+                                break;
 
-                        case "system":
-                        case "tool":
+                            case "system":
+                            case "tool":
                             // Render system / tool transcript notes as muted Status
                             // entries so they're visible but de-emphasized vs. the
                             // user/assistant turn flow.
@@ -1370,16 +1405,75 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                                 rebuilt,
                                 new ChatStatusEvent(text, ChatTone.Dim),
                                 msgMeta);
-                            break;
+                                break;
 
-                        default:
+                            default:
                             // Unknown role — fall back to assistant rendering so it's
                             // at least visible. Bracket with TurnEnd to avoid
                             // collapsing into adjacent assistant entries.
                             Logger.Debug($"[ChatHistory]   → routed: ASSISTANT (unknown role '{roleLower}', fallback)");
                             rebuilt = ApplyAndCaptureMeta(rebuilt, new ChatMessageEvent(RepairContentBlockSeams(text)), msgMeta);
                             rebuilt = ChatTimelineReducer.Apply(rebuilt, new ChatTurnEndEvent());
-                            break;
+                                break;
+                        }
+                    }
+
+                    foreach (var toolBlock in replayPart.ToolContent)
+                    {
+                        if (toolBlock.Kind == ChatToolContentKind.Call)
+                        {
+                            _ = TryMatchCachedTool(cachedTools, msg.Ts);
+                            var args = ConvertToolArgs(toolBlock.Args);
+                            var callId = toolBlock.CallId;
+                            if (string.IsNullOrWhiteSpace(callId))
+                            {
+                                callId = $"history-tool-{syntheticToolCallSequence++}";
+                                pendingUnkeyedToolCalls.Enqueue(callId);
+                            }
+                            rebuilt = ApplyAndCaptureMeta(
+                                rebuilt,
+                                new ChatToolStartEvent(
+                                    ToolLabel(toolBlock.ToolName, args),
+                                    toolBlock.ToolName,
+                                    args,
+                                    callId),
+                                msgMeta);
+                        }
+                        else
+                        {
+                            var callId = toolBlock.CallId;
+                            if (string.IsNullOrWhiteSpace(callId))
+                            {
+                                callId = pendingUnkeyedToolCalls.Count > 0
+                                    ? pendingUnkeyedToolCalls.Dequeue()
+                                    : $"history-tool-{syntheticToolCallSequence++}";
+                            }
+
+                            var correlationKey = new ChatToolCorrelationKey(
+                                RunId: null,
+                                LegacyTurn: rebuilt.ToolLegacyTurn,
+                                ToolCallId: callId);
+                            if (!rebuilt.ActiveToolCalls.ContainsKey(correlationKey))
+                            {
+                                var cached = TryMatchCachedTool(cachedTools, msg.Ts);
+                                var toolName = cached?.ToolName ?? toolBlock.ToolName;
+                                rebuilt = ApplyAndCaptureMeta(
+                                    rebuilt,
+                                    new ChatToolStartEvent(
+                                        cached?.Label ?? toolName,
+                                        toolName,
+                                        ToolCallId: callId),
+                                    msgMeta);
+                            }
+
+                            var output = NativeToolProjector.TruncateToolOutput(toolBlock.Text ?? string.Empty);
+                            rebuilt = ApplyAndCaptureMeta(
+                                rebuilt,
+                                toolBlock.IsError
+                                    ? new ChatToolErrorEvent(output, callId)
+                                    : new ChatToolOutputEvent(output, callId),
+                                msgMeta);
+                        }
                     }
                 }
                 // If the last user message was aborted but there's no subsequent
@@ -1395,8 +1489,9 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                     rebuilt = ChatTimelineReducer.Apply(rebuilt, new ChatTurnEndEvent());
                 }
 
-                // Final safety: ensure no lingering active turn after history load.
-                rebuilt = rebuilt with { TurnActive = false, ActiveAssistantId = null, ActiveReasoningId = null };
+                // Final safety: close the replayed turn and mark calls that never
+                // received a result as interrupted instead of leaving them running.
+                rebuilt = ChatTimelineReducer.Apply(rebuilt, new ChatTurnEndEvent());
 
                 // Append any prior live entries that weren't part of history.
                 // Dedup rules (HIGH 2 / rubber-duck round 2):
@@ -1554,8 +1649,15 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                     {
                         Entries = newEntries.ToImmutable(),
                         NextId = nextId,
-                        TurnActive = prior.TurnActive
+                        TurnActive = prior.TurnActive,
+                        PendingToolPresentations = prior.PendingToolPresentations,
+                        PendingToolOutcomes = prior.PendingToolOutcomes,
+                        TerminalToolCorrelations = prior.TerminalToolCorrelations,
+                        NextToolOutcomeSequence = prior.NextToolOutcomeSequence,
+                        NextToolCorrelationSequence = prior.NextToolCorrelationSequence,
+                        ToolLegacyTurn = prior.ToolLegacyTurn
                     };
+                    rebuilt = ChatTimelineReducer.RebuildActiveToolTracking(rebuilt);
                 }
 
                 _timelines[threadId] = rebuilt;
@@ -4696,6 +4798,39 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 RunId: evt.RunId),
             _ => null
         };
+    }
+
+    private static JsonObject? ConvertToolArgs(JsonElement? value)
+    {
+        if (value is not { ValueKind: JsonValueKind.Object } args)
+            return null;
+        return NativeToolProjector.ExtractSafeToolDisplayArgs(args);
+    }
+
+    private static string ToolLabel(string toolName, JsonObject? args)
+    {
+        foreach (var key in new[] { "command", "path", "file_path", "query", "url", "pattern" })
+        {
+            if (args?[key] is JsonValue value
+                && value.TryGetValue<string>(out var text)
+                && !string.IsNullOrWhiteSpace(text))
+            {
+                return TruncateToolLabel(text);
+            }
+        }
+
+        return toolName;
+    }
+
+    private static string TruncateToolLabel(string text)
+    {
+        if (text.Length <= 80)
+            return text;
+
+        var length = 77;
+        if (char.IsHighSurrogate(text[length - 1]))
+            length--;
+        return text[..length] + "\u2026";
     }
 
     /// <summary>

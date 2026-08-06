@@ -1208,6 +1208,268 @@ public class OpenClawGatewayClientTests
     }
 
     [Fact]
+    public void ParseChatHistoryPayload_ToolBlocks_PreservesInputsAndOutputs()
+    {
+        var helper = new GatewayClientTestHelper();
+
+        var history = helper.ParseChatHistoryPayload("""
+        {
+          "messages": [
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "call-1",
+                  "name": "exec",
+                  "input": {
+                    "command": "pwd",
+                    "workdir": "/workspace",
+                    "yieldMs": 1000
+                  }
+                }
+              ],
+              "timestamp": 1
+            },
+            {
+              "role": "toolResult",
+              "toolCallId": "call-1",
+              "content": [
+                {
+                  "type": "tool_result",
+                  "name": "exec",
+                  "content": [{ "type": "text", "text": "/workspace" }]
+                }
+              ],
+              "timestamp": 2
+            }
+          ]
+        }
+        """);
+
+        Assert.Equal(2, history.Messages.Count);
+        var call = Assert.Single(history.Messages[0].ToolContent);
+        Assert.Equal(ChatToolContentKind.Call, call.Kind);
+        Assert.Equal("call-1", call.CallId);
+        Assert.Equal("exec", call.ToolName);
+        Assert.Equal("pwd", call.Args?.GetProperty("command").GetString());
+
+        var result = Assert.Single(history.Messages[1].ToolContent);
+        Assert.Equal(ChatToolContentKind.Result, result.Kind);
+        Assert.Equal("call-1", result.CallId);
+        Assert.Equal("/workspace", result.Text);
+    }
+
+    [Theory]
+    [InlineData("tool_call_id")]
+    [InlineData("tool_use_id")]
+    public void ParseChatHistoryPayload_ToolResult_PrefersSemanticCallReference(string referenceProperty)
+    {
+        var helper = new GatewayClientTestHelper();
+
+        var history = helper.ParseChatHistoryPayload($$"""
+        {
+          "messages": [
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "call-1",
+                  "tool_call_id": "not-the-definition-id",
+                  "name": "exec",
+                  "input": { "command": "pwd" }
+                }
+              ],
+              "timestamp": 1
+            },
+            {
+              "role": "toolResult",
+              "toolCallId": "message-level-id",
+              "content": [
+                {
+                  "type": "tool_result",
+                  "id": "result-block-id",
+                  "{{referenceProperty}}": "call-1",
+                  "name": "exec",
+                  "content": "/workspace"
+                }
+              ],
+              "timestamp": 2
+            }
+          ]
+        }
+        """);
+
+        Assert.Equal("call-1", Assert.Single(history.Messages[0].ToolContent).CallId);
+        Assert.Equal("call-1", Assert.Single(history.Messages[1].ToolContent).CallId);
+    }
+
+    [Theory]
+    [InlineData("toolCallId")]
+    [InlineData("toolUseId")]
+    public void ParseChatHistoryPayload_ToolResult_PrefersMessageCallReferenceOverBlockId(
+        string referenceProperty)
+    {
+        var helper = new GatewayClientTestHelper();
+
+        var history = helper.ParseChatHistoryPayload($$"""
+        {
+          "messages": [
+            {
+              "role": "toolResult",
+              "{{referenceProperty}}": "call-1",
+              "content": [
+                {
+                  "type": "tool_result",
+                  "id": "result-block-id",
+                  "name": "exec",
+                  "content": "/workspace"
+                }
+              ],
+              "timestamp": 2
+            }
+          ]
+        }
+        """);
+
+        Assert.Equal("call-1", Assert.Single(history.Messages[0].ToolContent).CallId);
+    }
+
+    [Theory]
+    [InlineData("toolResult")]
+    [InlineData("tool_result")]
+    public void ParseChatHistoryPayload_StringToolResult_PreservesCallId(string role)
+    {
+        var helper = new GatewayClientTestHelper();
+
+        var history = helper.ParseChatHistoryPayload($$"""
+        {
+          "messages": [
+            {
+              "role": "{{role}}",
+              "toolCallId": "call-1",
+              "toolName": "exec",
+              "content": "/workspace",
+              "timestamp": 2
+            }
+          ]
+        }
+        """);
+
+        var message = Assert.Single(history.Messages);
+        Assert.Equal("/workspace", message.Text);
+        var result = Assert.Single(message.ToolContent);
+        Assert.Equal(ChatToolContentKind.Result, result.Kind);
+        Assert.Equal("call-1", result.CallId);
+        Assert.Equal("exec", result.ToolName);
+        Assert.Equal("/workspace", result.Text);
+    }
+
+    [Theory]
+    [InlineData("tool")]
+    [InlineData("function")]
+    public void ParseChatHistoryPayload_StringLegacyToolRole_DoesNotSynthesizeToolResult(string role)
+    {
+        var helper = new GatewayClientTestHelper();
+
+        var history = helper.ParseChatHistoryPayload($$"""
+        {
+          "messages": [
+            {
+              "role": "{{role}}",
+              "toolCallId": "call-1",
+              "toolName": "exec",
+              "content": "/workspace",
+              "timestamp": 2
+            }
+          ]
+        }
+        """);
+
+        var message = Assert.Single(history.Messages);
+        Assert.Equal("/workspace", message.Text);
+        Assert.Empty(message.ToolContent);
+    }
+
+    [Theory]
+    [InlineData("tool")]
+    [InlineData("function")]
+    public void ParseChatHistoryPayload_ArrayLegacyToolRole_PreservesSynthesizedToolResult(string role)
+    {
+        var helper = new GatewayClientTestHelper();
+
+        var history = helper.ParseChatHistoryPayload($$"""
+        {
+          "messages": [
+            {
+              "role": "{{role}}",
+              "toolCallId": "call-1",
+              "toolName": "exec",
+              "content": [{ "type": "text", "text": "/workspace" }],
+              "timestamp": 2
+            }
+          ]
+        }
+        """);
+
+        var message = Assert.Single(history.Messages);
+        Assert.Equal("/workspace", message.Text);
+        var result = Assert.Single(message.ToolContent);
+        Assert.Equal(ChatToolContentKind.Result, result.Kind);
+        Assert.Equal("call-1", result.CallId);
+        Assert.Equal("exec", result.ToolName);
+        Assert.Equal("/workspace", result.Text);
+    }
+
+    [Fact]
+    public void ParseChatHistoryPayload_InterleavedBlocks_PreserveSourceOrder()
+    {
+        var helper = new GatewayClientTestHelper();
+
+        var history = helper.ParseChatHistoryPayload("""
+        {
+          "messages": [
+            {
+              "role": "assistant",
+              "content": [
+                { "type": "text", "text": "Before" },
+                {
+                  "type": "tool_use",
+                  "id": "call-1",
+                  "name": "exec",
+                  "input": { "command": "pwd" }
+                },
+                { "type": "text", "text": "After" }
+              ],
+              "timestamp": 1
+            }
+          ]
+        }
+        """);
+
+        var message = Assert.Single(history.Messages);
+        Assert.Equal("Before\nAfter", message.Text);
+        Assert.Collection(
+            message.ContentParts,
+            part =>
+            {
+                Assert.Equal(ChatMessageContentPartKind.Text, part.Kind);
+                Assert.Equal("Before", part.Text);
+            },
+            part =>
+            {
+                Assert.Equal(ChatMessageContentPartKind.Tool, part.Kind);
+                Assert.Equal("call-1", part.Tool?.CallId);
+            },
+            part =>
+            {
+                Assert.Equal(ChatMessageContentPartKind.Text, part.Kind);
+                Assert.Equal("After", part.Text);
+            });
+    }
+
+    [Fact]
     public void ParseChatHistoryPayload_OpenClawMetadata_PreservesMessageIdentity()
     {
         var helper = new GatewayClientTestHelper();

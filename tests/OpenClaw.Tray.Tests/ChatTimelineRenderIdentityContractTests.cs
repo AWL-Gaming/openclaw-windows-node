@@ -145,24 +145,24 @@ public sealed class ChatTimelineRenderIdentityContractTests
     [Fact]
     public void ReactorToolRows_RenderSafeArgsAndLocalizedStatusWithoutChangingRowKeys()
     {
-        var timeline = Read("src", "OpenClaw.Tray.WinUI", "Chat", "ReactorChatTimeline.cs");
+        var renderer = Read("src", "OpenClaw.Tray.WinUI", "Chat", "ToolCallCardRenderer.cs");
 
-        Assert.Contains("FormatToolDisplayArgs(entry.ToolArgs)", timeline);
-        Assert.Contains("foreach (var key in NativeToolProjector.DisplayArgumentKeys)", timeline);
+        Assert.Contains("FormatToolDisplayArgs(entry.ToolArgs)", renderer);
+        Assert.Contains("foreach (var key in NativeToolProjector.DisplayArgumentKeys)", renderer);
         Assert.DoesNotContain(
             "new[] { \"command\", \"path\", \"file_path\", \"query\", \"url\", \"pattern\" }",
-            timeline);
-        Assert.Contains("Chat_Tool_InputSection", timeline);
-        Assert.Contains("Chat_Status_Running", timeline);
-        Assert.Contains("Chat_Status_Done", timeline);
-        Assert.Contains("Chat_Status_Error", timeline);
-        Assert.Contains("Chat_Status_Interrupted", timeline);
-        Assert.Contains("Chat_Tool_CallLabel", timeline);
-        Assert.Contains("tool-expander:{entry.Id}:collapse:{row.Props.Timeline.ToolCallsCollapseVersion}", timeline);
-        Assert.DoesNotContain("entry.ToolArgs.ToJsonString", timeline);
-        Assert.DoesNotContain("{entry.ToolResult}", timeline);
-        Assert.DoesNotContain("ToolRunId", timeline);
-        Assert.DoesNotContain("ToolLegacyTurn", timeline);
+            renderer);
+        Assert.Contains("Chat_Tool_InputSection", renderer);
+        Assert.Contains("Chat_Status_Running", renderer);
+        Assert.Contains("Chat_Status_Done", renderer);
+        Assert.Contains("Chat_Status_Error", renderer);
+        Assert.Contains("Chat_Status_Interrupted", renderer);
+        Assert.Contains("Chat_Tool_CallLabel", renderer);
+        Assert.Contains("tool-expander:{entry.Id}:collapse:{props.ToolCallsCollapseVersion}", renderer);
+        Assert.DoesNotContain("entry.ToolArgs.ToJsonString", renderer);
+        Assert.DoesNotContain("{entry.ToolResult}", renderer);
+        Assert.DoesNotContain("ToolRunId", renderer);
+        Assert.DoesNotContain("ToolLegacyTurn", renderer);
     }
 
     private static string Read(params string[] parts)

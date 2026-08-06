@@ -605,11 +605,18 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
             if (m.TryGetProperty("stopReason", out var sr))
                 stopReason = sr.GetString();
 
-            // content can be a plain string OR an array of {type:"text", text:"..."} blocks
+            // Content can include text and structured tool call/result blocks.
             string text = ExtractMessageText(m);
-            if (string.IsNullOrEmpty(text)) continue;
+            var toolContent = ExtractToolContent(m, role, text);
+            var contentParts = ExtractOrderedMessageContent(m, role, toolContent);
+            if (string.IsNullOrEmpty(text) && toolContent.Count == 0) continue;
             if (string.IsNullOrEmpty(role)) continue;
-            if (ChatMessageInfo.IsSilentAssistantDirective(role, text)) continue;
+            if (!string.IsNullOrEmpty(text)
+                && toolContent.Count == 0
+                && ChatMessageInfo.IsSilentAssistantDirective(role, text))
+            {
+                continue;
+            }
 
             var (inputTokens, outputTokens, responseTokens, contextPercent) = ExtractChatUsage(m);
             list.Add(new ChatMessageInfo
@@ -617,6 +624,8 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
                 SessionKey = sessionKey,
                 Role = role,
                 Text = text,
+                ToolContent = toolContent,
+                ContentParts = contentParts,
                 State = "final",
                 Ts = ts,
                 OpenClawId = openClawMetadata.Id,
@@ -663,6 +672,275 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
         }
 
         return string.Empty;
+    }
+
+    private static IReadOnlyList<ChatToolContentInfo> ExtractToolContent(
+        JsonElement message,
+        string role,
+        string messageText)
+    {
+        var blocks = new List<ChatToolContentInfo>();
+        var hasArrayContent = message.TryGetProperty("content", out var content)
+            && content.ValueKind == JsonValueKind.Array;
+        if (hasArrayContent)
+        {
+            foreach (var item in content.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object
+                    || !item.TryGetProperty("type", out var typeElement)
+                    || typeElement.ValueKind != JsonValueKind.String)
+                {
+                    continue;
+                }
+
+                var normalizedType = (typeElement.GetString() ?? string.Empty)
+                    .Replace("_", string.Empty, StringComparison.Ordinal)
+                    .ToLowerInvariant();
+                var kind = normalizedType switch
+                {
+                    "toolcall" or "tooluse" => ChatToolContentKind.Call,
+                    "toolresult" => ChatToolContentKind.Result,
+                    _ => (ChatToolContentKind?)null,
+                };
+                if (kind is null)
+                    continue;
+
+                var itemSemanticCallId = ReadFirstString(
+                    item,
+                    "tool_call_id",
+                    "toolCallId",
+                    "tool_use_id",
+                    "toolUseId");
+                var messageSemanticCallId = ReadFirstString(
+                    message,
+                    "tool_call_id",
+                    "toolCallId",
+                    "tool_use_id",
+                    "toolUseId");
+                var callId = kind == ChatToolContentKind.Call
+                    ? ReadFirstString(
+                        item,
+                        "id",
+                        "tool_call_id",
+                        "toolCallId",
+                        "tool_use_id",
+                        "toolUseId")
+                        ?? messageSemanticCallId
+                    : itemSemanticCallId
+                        ?? messageSemanticCallId
+                        ?? ReadFirstString(item, "id");
+                blocks.Add(new ChatToolContentInfo
+                {
+                    Kind = kind.Value,
+                    CallId = callId,
+                    ToolName = ReadFirstString(item, "name")
+                        ?? ReadFirstString(message, "toolName", "tool_name")
+                        ?? "tool",
+                    Args = kind == ChatToolContentKind.Call
+                        ? ReadFirstValue(item, "args", "arguments", "input")
+                        : null,
+                    Text = kind == ChatToolContentKind.Result
+                        ? ExtractToolContentText(item)
+                        : null,
+                    IsError = ReadBoolean(item, "isError", "is_error"),
+                });
+            }
+        }
+
+        var normalizedRole = role.Replace("_", string.Empty, StringComparison.Ordinal)
+            .ToLowerInvariant();
+        var supportsResultFallback = normalizedRole == "toolresult"
+            || (hasArrayContent && normalizedRole is "tool" or "function");
+        if (blocks.All(static block => block.Kind != ChatToolContentKind.Result)
+            && supportsResultFallback
+            && !string.IsNullOrEmpty(messageText))
+        {
+            blocks.Add(new ChatToolContentInfo
+            {
+                Kind = ChatToolContentKind.Result,
+                CallId = ReadFirstString(
+                    message,
+                    "tool_call_id",
+                    "toolCallId",
+                    "tool_use_id",
+                    "toolUseId"),
+                ToolName = ReadFirstString(message, "toolName", "tool_name", "name") ?? "tool",
+                Text = messageText,
+                IsError = ReadBoolean(message, "isError", "is_error"),
+            });
+        }
+
+        return blocks;
+    }
+
+    private static IReadOnlyList<ChatMessageContentPartInfo> ExtractOrderedMessageContent(
+        JsonElement message,
+        string role,
+        IReadOnlyList<ChatToolContentInfo> toolContent)
+    {
+        if (!message.TryGetProperty("content", out var content)
+            || content.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<ChatMessageContentPartInfo>();
+        }
+
+        var parts = new List<ChatMessageContentPartInfo>();
+        var text = new StringBuilder();
+        var toolIndex = 0;
+        var structuredToolCount = 0;
+
+        void FlushText()
+        {
+            if (text.Length == 0)
+                return;
+
+            parts.Add(new ChatMessageContentPartInfo
+            {
+                Kind = ChatMessageContentPartKind.Text,
+                Text = text.ToString(),
+            });
+            text.Clear();
+        }
+
+        foreach (var item in content.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.String)
+            {
+                text.Append(item.GetString());
+                continue;
+            }
+
+            if (item.ValueKind != JsonValueKind.Object
+                || !item.TryGetProperty("type", out var typeElement)
+                || typeElement.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            var normalizedType = (typeElement.GetString() ?? string.Empty)
+                .Replace("_", string.Empty, StringComparison.Ordinal)
+                .ToLowerInvariant();
+            if (normalizedType == "text")
+            {
+                if (item.TryGetProperty("text", out var textElement)
+                    && textElement.ValueKind == JsonValueKind.String)
+                {
+                    if (text.Length > 0)
+                        text.Append('\n');
+                    text.Append(textElement.GetString());
+                }
+                continue;
+            }
+
+            if (normalizedType is not ("toolcall" or "tooluse" or "toolresult"))
+                continue;
+
+            FlushText();
+            structuredToolCount++;
+            if (toolIndex < toolContent.Count)
+            {
+                parts.Add(new ChatMessageContentPartInfo
+                {
+                    Kind = ChatMessageContentPartKind.Tool,
+                    Tool = toolContent[toolIndex++],
+                });
+            }
+        }
+
+        FlushText();
+
+        var normalizedRole = role.Replace("_", string.Empty, StringComparison.Ordinal)
+            .ToLowerInvariant();
+        if (structuredToolCount == 0
+            && normalizedRole is "toolresult" or "tool" or "function"
+            && toolContent.Count > 0)
+        {
+            return toolContent
+                .Select(static tool => new ChatMessageContentPartInfo
+                {
+                    Kind = ChatMessageContentPartKind.Tool,
+                    Tool = tool,
+                })
+                .ToArray();
+        }
+
+        while (toolIndex < toolContent.Count)
+        {
+            parts.Add(new ChatMessageContentPartInfo
+            {
+                Kind = ChatMessageContentPartKind.Tool,
+                Tool = toolContent[toolIndex++],
+            });
+        }
+
+        return parts;
+    }
+
+    private static JsonElement? ReadFirstValue(JsonElement value, params string[] propertyNames)
+    {
+        foreach (var propertyName in propertyNames)
+        {
+            if (value.TryGetProperty(propertyName, out var property))
+                return property.Clone();
+        }
+
+        return null;
+    }
+
+    private static string? ReadFirstString(JsonElement value, params string[] propertyNames)
+    {
+        foreach (var propertyName in propertyNames)
+        {
+            if (value.TryGetProperty(propertyName, out var property)
+                && property.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(property.GetString()))
+            {
+                return property.GetString();
+            }
+        }
+
+        return null;
+    }
+
+    private static bool ReadBoolean(JsonElement value, params string[] propertyNames)
+    {
+        foreach (var propertyName in propertyNames)
+        {
+            if (value.TryGetProperty(propertyName, out var property)
+                && property.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                return property.GetBoolean();
+            }
+        }
+
+        return false;
+    }
+
+    private static string? ExtractToolContentText(JsonElement item)
+    {
+        if (item.TryGetProperty("text", out var text)
+            && text.ValueKind == JsonValueKind.String)
+        {
+            return text.GetString();
+        }
+
+        if (!item.TryGetProperty("content", out var content))
+            return null;
+        if (content.ValueKind == JsonValueKind.String)
+            return content.GetString();
+        if (content.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var parts = content.EnumerateArray()
+            .Where(static part => part.ValueKind == JsonValueKind.Object)
+            .Select(static part =>
+                part.TryGetProperty("text", out var partText)
+                && partText.ValueKind == JsonValueKind.String
+                    ? partText.GetString()
+                    : null)
+            .Where(static part => !string.IsNullOrEmpty(part))
+            .ToArray();
+        return parts.Length > 0 ? string.Join('\n', parts) : null;
     }
 
     /// <summary>

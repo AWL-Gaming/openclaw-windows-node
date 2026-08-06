@@ -202,7 +202,7 @@ internal static class NativeToolProjector
                 {
                     var text = value.GetString();
                     if (!string.IsNullOrEmpty(text))
-                        return TruncateForToolOutput(text);
+                        return TruncateToolOutput(text);
                 }
                 else if (value.ValueKind == JsonValueKind.Object
                          && value.TryGetProperty("text", out var inner)
@@ -210,7 +210,7 @@ internal static class NativeToolProjector
                 {
                     var text = inner.GetString();
                     if (!string.IsNullOrEmpty(text))
-                        return TruncateForToolOutput(text);
+                        return TruncateToolOutput(text);
                 }
             }
         }
@@ -220,7 +220,7 @@ internal static class NativeToolProjector
         {
             var text = title.GetString();
             if (!string.IsNullOrEmpty(text))
-                return TruncateForToolOutput(text);
+                return TruncateToolOutput(text);
         }
 
         return string.Empty;
@@ -239,12 +239,12 @@ internal static class NativeToolProjector
         if (data.TryGetProperty("result", out var result))
         {
             if (result.ValueKind == JsonValueKind.String)
-                return TruncateForToolOutput(result.GetString() ?? "");
+                return TruncateToolOutput(result.GetString() ?? "");
             if (result.ValueKind == JsonValueKind.Object
                 && result.TryGetProperty("content", out var resultContent)
                 && resultContent.ValueKind == JsonValueKind.String)
             {
-                return TruncateForToolOutput(resultContent.GetString() ?? "");
+                return TruncateToolOutput(resultContent.GetString() ?? "");
             }
         }
 
@@ -255,7 +255,7 @@ internal static class NativeToolProjector
             {
                 var text = value.GetString();
                 if (!string.IsNullOrEmpty(text))
-                    return TruncateForToolOutput(text);
+                    return TruncateToolOutput(text);
             }
         }
         return fallback;
@@ -271,7 +271,7 @@ internal static class NativeToolProjector
                 {
                     var text = value.GetString();
                     if (!string.IsNullOrEmpty(text))
-                        return TruncateForToolOutput(text);
+                        return TruncateToolOutput(text);
                 }
                 else if (value.ValueKind == JsonValueKind.Object
                          && value.TryGetProperty("message", out var inner)
@@ -279,7 +279,7 @@ internal static class NativeToolProjector
                 {
                     var text = inner.GetString();
                     if (!string.IsNullOrEmpty(text))
-                        return TruncateForToolOutput(text);
+                        return TruncateToolOutput(text);
                 }
             }
         }
@@ -483,7 +483,7 @@ internal static class NativeToolProjector
         }
     }
 
-    private static string TruncateForToolOutput(string text)
+    internal static string TruncateToolOutput(string text)
     {
         if (text.Length <= ToolOutputMaxChars)
             return text;

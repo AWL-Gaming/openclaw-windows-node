@@ -2797,6 +2797,7 @@ public class OpenClawChatDataProviderTests
         Assert.Equal("PowerShell", entry.ToolName);
         Assert.Equal("ls", entry.Text);
         Assert.Equal(ChatToolCallStatus.InProgress, entry.ToolResult);
+        Assert.Equal("ls", entry.ToolArgs?["command"]?.GetValue<string>());
     }
 
     [Fact]
@@ -5816,6 +5817,393 @@ public class OpenClawChatDataProviderTests
     }
 
     [Fact]
+    public async Task LoadHistoryAsync_StructuredToolBlocks_CorrelatesInputAndOutput()
+    {
+        var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });
+        bridge.HistoryBehavior = _ => Task.FromResult(new ChatHistoryInfo
+        {
+            SessionKey = "main",
+            Messages =
+            [
+                new ChatMessageInfo
+                {
+                    Role = "assistant",
+                    Text = "",
+                    State = "final",
+                    Ts = 1,
+                    ToolContent =
+                    [
+                        new ChatToolContentInfo
+                        {
+                            Kind = ChatToolContentKind.Call,
+                            CallId = "call-1",
+                            ToolName = "exec",
+                            Args = JsonSerializer.Deserialize<JsonElement>(
+                                """{"command":"pwd","workdir":"/workspace","yieldMs":1000}"""),
+                        },
+                    ],
+                },
+                new ChatMessageInfo
+                {
+                    Role = "toolResult",
+                    Text = "",
+                    State = "final",
+                    Ts = 2,
+                    ToolContent =
+                    [
+                        new ChatToolContentInfo
+                        {
+                            Kind = ChatToolContentKind.Result,
+                            CallId = "call-1",
+                            ToolName = "exec",
+                            Text = "/workspace",
+                        },
+                    ],
+                },
+            ],
+        });
+
+        await provider.LoadHistoryAsync("main");
+
+        var entry = Assert.Single(snapshots[^1].Timelines["main"].Entries);
+        Assert.Equal(ChatTimelineItemKind.ToolCall, entry.Kind);
+        Assert.Equal(ChatToolCallStatus.Success, entry.ToolResult);
+        Assert.Equal("pwd", entry.ToolArgs?["command"]?.GetValue<string>());
+        Assert.Equal("/workspace", entry.ToolOutput);
+    }
+
+    [Theory]
+    [InlineData("toolResult")]
+    [InlineData("tool_result")]
+    public async Task LoadHistoryAsync_StringToolResult_CompletesOriginalCall(string role)
+    {
+        var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });
+        bridge.HistoryBehavior = _ => Task.FromResult(new ChatHistoryInfo
+        {
+            SessionKey = "main",
+            Messages =
+            [
+                new ChatMessageInfo
+                {
+                    Role = "assistant",
+                    State = "final",
+                    Ts = 1,
+                    ToolContent =
+                    [
+                        new ChatToolContentInfo
+                        {
+                            Kind = ChatToolContentKind.Call,
+                            CallId = "call-1",
+                            ToolName = "exec",
+                            Args = JsonSerializer.Deserialize<JsonElement>("""{"command":"pwd"}"""),
+                        },
+                    ],
+                },
+                new ChatMessageInfo
+                {
+                    Role = role,
+                    Text = "/workspace",
+                    State = "final",
+                    Ts = 2,
+                    ToolContent =
+                    [
+                        new ChatToolContentInfo
+                        {
+                            Kind = ChatToolContentKind.Result,
+                            CallId = "call-1",
+                            ToolName = "exec",
+                            Text = "/workspace",
+                        },
+                    ],
+                },
+            ],
+        });
+
+        await provider.LoadHistoryAsync("main");
+
+        var entry = Assert.Single(snapshots[^1].Timelines["main"].Entries);
+        Assert.Equal("call-1", entry.ToolCallId);
+        Assert.Equal(ChatToolCallStatus.Success, entry.ToolResult);
+        Assert.Equal("/workspace", entry.ToolOutput);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LoadHistoryAsync_AbortedUserBeforeToolFirstAssistant_SuppressesEntireAssistantMessage(
+        bool includeTrailingText)
+    {
+        var tool = new ChatToolContentInfo
+        {
+            Kind = ChatToolContentKind.Call,
+            CallId = "call-1",
+            ToolName = "exec",
+            Args = JsonSerializer.Deserialize<JsonElement>("""{"command":"pwd"}"""),
+        };
+        var contentParts = new List<ChatMessageContentPartInfo>
+        {
+            new()
+            {
+                Kind = ChatMessageContentPartKind.Tool,
+                Tool = tool,
+            },
+        };
+        if (includeTrailingText)
+        {
+            contentParts.Add(new ChatMessageContentPartInfo
+            {
+                Kind = ChatMessageContentPartKind.Text,
+                Text = "partial answer",
+            });
+        }
+
+        var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });
+        MarkPersistedMessageAborted(provider, "main", "aborted-user");
+        bridge.HistoryBehavior = _ => Task.FromResult(new ChatHistoryInfo
+        {
+            SessionKey = "main",
+            Messages =
+            [
+                new ChatMessageInfo
+                {
+                    Role = "user",
+                    Text = "run it",
+                    State = "final",
+                    Ts = 1,
+                    OpenClawId = "aborted-user",
+                },
+                new ChatMessageInfo
+                {
+                    Role = "assistant",
+                    Text = includeTrailingText ? "partial answer" : string.Empty,
+                    State = "final",
+                    Ts = 2,
+                    ToolContent = [tool],
+                    ContentParts = contentParts,
+                },
+                new ChatMessageInfo
+                {
+                    Role = "assistant",
+                    Text = "next response",
+                    State = "final",
+                    Ts = 3,
+                },
+            ],
+        });
+
+        await provider.LoadHistoryAsync("main");
+
+        Assert.Collection(
+            snapshots[^1].Timelines["main"].Entries,
+            entry =>
+            {
+                Assert.Equal(ChatTimelineItemKind.User, entry.Kind);
+                Assert.Equal("run it", entry.Text);
+            },
+            entry =>
+            {
+                Assert.Equal(ChatTimelineItemKind.Status, entry.Kind);
+                Assert.Equal("Response was stopped", entry.Text);
+                Assert.Equal(ChatTone.Warning, entry.Tone);
+            },
+            entry =>
+            {
+                Assert.Equal(ChatTimelineItemKind.Assistant, entry.Kind);
+                Assert.Equal("next response", entry.Text);
+            });
+    }
+
+    [Fact]
+    public async Task LoadHistoryAsync_InterleavedContentParts_PreserveChronologyAndCorrelation()
+    {
+        var call = new ChatToolContentInfo
+        {
+            Kind = ChatToolContentKind.Call,
+            CallId = "call-1",
+            ToolName = "exec",
+            Args = JsonSerializer.Deserialize<JsonElement>("""{"command":"pwd"}"""),
+        };
+        var result = new ChatToolContentInfo
+        {
+            Kind = ChatToolContentKind.Result,
+            CallId = "call-1",
+            ToolName = "exec",
+            Text = "/workspace",
+        };
+        var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });
+        bridge.HistoryBehavior = _ => Task.FromResult(new ChatHistoryInfo
+        {
+            SessionKey = "main",
+            Messages =
+            [
+                new ChatMessageInfo
+                {
+                    Role = "assistant",
+                    Text = "Before\nMiddle\nAfter",
+                    State = "final",
+                    Ts = 1,
+                    ToolContent = [call, result],
+                    ContentParts =
+                    [
+                        new ChatMessageContentPartInfo
+                        {
+                            Kind = ChatMessageContentPartKind.Text,
+                            Text = "Before",
+                        },
+                        new ChatMessageContentPartInfo
+                        {
+                            Kind = ChatMessageContentPartKind.Tool,
+                            Tool = call,
+                        },
+                        new ChatMessageContentPartInfo
+                        {
+                            Kind = ChatMessageContentPartKind.Text,
+                            Text = "Middle",
+                        },
+                        new ChatMessageContentPartInfo
+                        {
+                            Kind = ChatMessageContentPartKind.Tool,
+                            Tool = result,
+                        },
+                        new ChatMessageContentPartInfo
+                        {
+                            Kind = ChatMessageContentPartKind.Text,
+                            Text = "After",
+                        },
+                    ],
+                },
+            ],
+        });
+
+        await provider.LoadHistoryAsync("main");
+
+        var entries = snapshots[^1].Timelines["main"].Entries;
+        Assert.Collection(
+            entries,
+            entry =>
+            {
+                Assert.Equal(ChatTimelineItemKind.Assistant, entry.Kind);
+                Assert.Equal("Before", entry.Text);
+            },
+            entry =>
+            {
+                Assert.Equal(ChatTimelineItemKind.ToolCall, entry.Kind);
+                Assert.Equal(ChatToolCallStatus.Success, entry.ToolResult);
+                Assert.Equal("/workspace", entry.ToolOutput);
+            },
+            entry =>
+            {
+                Assert.Equal(ChatTimelineItemKind.Assistant, entry.Kind);
+                Assert.Equal("Middle", entry.Text);
+            },
+            entry =>
+            {
+                Assert.Equal(ChatTimelineItemKind.Assistant, entry.Kind);
+                Assert.Equal("After", entry.Text);
+            });
+    }
+
+    [Fact]
+    public async Task LoadHistoryAsync_StructuredOrphanResult_SynthesizesCompletedTool()
+    {
+        var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });
+        bridge.HistoryBehavior = _ => Task.FromResult(new ChatHistoryInfo
+        {
+            SessionKey = "main",
+            Messages =
+            [
+                new ChatMessageInfo
+                {
+                    Role = "toolResult",
+                    Text = "",
+                    State = "final",
+                    Ts = 1,
+                    ToolContent =
+                    [
+                        new ChatToolContentInfo
+                        {
+                            Kind = ChatToolContentKind.Result,
+                            CallId = "missing-call",
+                            ToolName = "exec",
+                            Text = "output",
+                        },
+                    ],
+                },
+            ],
+        });
+
+        await provider.LoadHistoryAsync("main");
+
+        var entry = Assert.Single(snapshots[^1].Timelines["main"].Entries);
+        Assert.Equal(ChatToolCallStatus.Success, entry.ToolResult);
+        Assert.Equal("output", entry.ToolOutput);
+    }
+
+    [Fact]
+    public async Task LoadHistoryAsync_StructuredCallWithoutResult_IsInterrupted()
+    {
+        var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });
+        bridge.HistoryBehavior = _ => Task.FromResult(new ChatHistoryInfo
+        {
+            SessionKey = "main",
+            Messages =
+            [
+                new ChatMessageInfo
+                {
+                    Role = "assistant",
+                    Text = "",
+                    State = "final",
+                    Ts = 1,
+                    ToolContent =
+                    [
+                        new ChatToolContentInfo
+                        {
+                            Kind = ChatToolContentKind.Call,
+                            CallId = "call-1",
+                            ToolName = "exec",
+                            Args = JsonSerializer.Deserialize<JsonElement>("""{"command":"sleep 30"}"""),
+                        },
+                    ],
+                },
+            ],
+        });
+
+        await provider.LoadHistoryAsync("main");
+
+        var entry = Assert.Single(snapshots[^1].Timelines["main"].Entries);
+        Assert.Equal(ChatToolCallStatus.Interrupted, entry.ToolResult);
+    }
+
+    [Fact]
+    public async Task LoadHistoryAsync_LiveToolStartedDuringRequest_RemainsCorrelated()
+    {
+        var pendingHistory = new TaskCompletionSource<ChatHistoryInfo>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });
+        bridge.HistoryBehavior = _ => pendingHistory.Task;
+        await provider.LoadAsync();
+
+        var historyLoad = provider.LoadHistoryAsync("main");
+        bridge.RaiseAgent(MakeAgentEvent(
+            "tool",
+            """{"phase":"start","name":"exec","itemId":"live-call","args":{"command":"pwd"}}"""));
+
+        pendingHistory.SetResult(new ChatHistoryInfo { SessionKey = "main" });
+        await historyLoad;
+
+        var inProgress = Assert.Single(snapshots[^1].Timelines["main"].Entries);
+        Assert.Equal(ChatToolCallStatus.InProgress, inProgress.ToolResult);
+
+        bridge.RaiseAgent(MakeAgentEvent(
+            "tool",
+            """{"phase":"result","name":"exec","itemId":"live-call","result":{"content":"/workspace"}}"""));
+
+        var completed = Assert.Single(snapshots[^1].Timelines["main"].Entries);
+        Assert.Equal(ChatToolCallStatus.Success, completed.ToolResult);
+        Assert.Equal("/workspace", completed.ToolOutput);
+    }
+
+    [Fact]
     public async Task LoadHistoryAsync_ToolRole_RendersAsDimStatusEntry()
     {
         var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });
@@ -6034,7 +6422,7 @@ public class OpenClawChatDataProviderTests
         await provider.LoadAsync();
 
         bridge.RaiseAgent(MakeAgentEvent("item",
-            """{"phase":"start","kind":"tool","title":"exec run command echo hi","itemId":"tool-1"}"""));
+            """{"phase":"start","kind":"tool","title":"exec run command echo hi","itemId":"tool-1","input":{"command":"echo hi","workdir":"/workspace","yieldMs":1000}}"""));
         bridge.RaiseAgent(MakeAgentEvent("command_output",
             """{"phase":"end","itemId":"tool-1","output":"hi\n"}"""));
         bridge.RaiseAgent(MakeAgentEvent("item",
@@ -6044,6 +6432,9 @@ public class OpenClawChatDataProviderTests
         var entry = Assert.Single(timeline.Entries);
         Assert.Equal(ChatToolCallStatus.Success, entry.ToolResult);
         Assert.Equal("hi\n", entry.ToolOutput);
+        Assert.Equal("echo hi", entry.ToolArgs?["command"]?.GetValue<string>());
+        Assert.False(entry.ToolArgs?.ContainsKey("workdir"));
+        Assert.False(entry.ToolArgs?.ContainsKey("yieldMs"));
     }
 
     [Theory]
@@ -9818,6 +10209,19 @@ public class OpenClawChatDataProviderTests
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         Assert.NotNull(field);
         return Assert.IsAssignableFrom<ISet<string>>(field.GetValue(provider));
+    }
+
+    private static void MarkPersistedMessageAborted(
+        OpenClawChatDataProvider provider,
+        string threadId,
+        string messageId)
+    {
+        var field = typeof(OpenClawChatDataProvider).GetField(
+            "_persistedAbortedIds",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        var abortedIds = Assert.IsType<Dictionary<string, HashSet<string>>>(field.GetValue(provider));
+        abortedIds[threadId] = [messageId];
     }
 
     private static bool HasFailedQueuedMessage(ChatDataSnapshot snapshot, string threadId, string text) =>
