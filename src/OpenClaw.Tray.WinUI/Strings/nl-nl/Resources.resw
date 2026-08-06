@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <root xmlns:ns1="urn:schemas-microsoft-com:xml-msdata" xmlns:xs="http://www.w3.org/2001/XMLSchema">
   <xs:schema id="root">
     <xs:element name="root" ns1:IsDataSet="true">
@@ -2843,13 +2843,16 @@ Gebruik een van deze opties:
     <value>Voltooid</value>
   </data>
   <data name="Chat_Compaction_Title" xml:space="preserve">
-    <value>Context gecomprimeerd</value>
+    <value>GECOMPRIMEERDE GESCHIEDENIS</value>
   </data>
   <data name="Chat_Compaction_MetricsFormat" xml:space="preserve">
     <value>{0} → {1} tokens · {2} bespaard</value>
   </data>
   <data name="Chat_Compaction_FallbackDetail" xml:space="preserve">
-    <value>Eerdere context is samengevat in een controlepunt.</value>
+    <value>Het gecomprimeerde transcript wordt bewaard als controlepunt. Open de sessiecontrolepunten om vanaf die gecomprimeerde weergave een vertakking te maken of deze te herstellen.</value>
+  </data>
+  <data name="Chat_Compaction_OpenCheckpoints" xml:space="preserve">
+    <value>Controlepunten openen</value>
   </data>
   <data name="Chat_PendingNewSessionTitle" xml:space="preserve">
     <value>Nieuwe sessie</value>
@@ -2884,6 +2887,27 @@ Gebruik een van deze opties:
   <data name="Chat_Tool_FooterWithTimeFormat" xml:space="preserve">
     <value>Hulpmiddel · {0}</value>
   </data>
+  <data name="Chat_Activity_CommandOne" xml:space="preserve"><value>{0} opdracht uitgevoerd</value></data>
+  <data name="Chat_Activity_CommandMany" xml:space="preserve"><value>{0} opdrachten uitgevoerd</value></data>
+  <data name="Chat_Activity_ReadOne" xml:space="preserve"><value>{0} bestand gelezen</value></data>
+  <data name="Chat_Activity_ReadMany" xml:space="preserve"><value>{0} bestanden gelezen</value></data>
+  <data name="Chat_Activity_EditOne" xml:space="preserve"><value>{0} bestand bewerkt</value></data>
+  <data name="Chat_Activity_EditMany" xml:space="preserve"><value>{0} bestanden bewerkt</value></data>
+  <data name="Chat_Activity_WriteOne" xml:space="preserve"><value>{0} bestand geschreven</value></data>
+  <data name="Chat_Activity_WriteMany" xml:space="preserve"><value>{0} bestanden geschreven</value></data>
+  <data name="Chat_Activity_SearchOne" xml:space="preserve"><value>{0} zoekopdracht uitgevoerd</value></data>
+  <data name="Chat_Activity_SearchMany" xml:space="preserve"><value>{0} zoekopdrachten uitgevoerd</value></data>
+  <data name="Chat_Activity_FetchOne" xml:space="preserve"><value>{0} pagina opgehaald</value></data>
+  <data name="Chat_Activity_FetchMany" xml:space="preserve"><value>{0} pagina's opgehaald</value></data>
+  <data name="Chat_Activity_GenericOne" xml:space="preserve"><value>{0} hulpmiddel gebruikt</value></data>
+  <data name="Chat_Activity_GenericMany" xml:space="preserve"><value>{0} hulpmiddelen gebruikt</value></data>
+  <data name="Chat_Activity_GenericNamed" xml:space="preserve"><value>{1} gebruikt</value></data>
+  <data name="Chat_Activity_GenericNamedRepeated" xml:space="preserve"><value>{1} {0} keer gebruikt</value></data>
+  <data name="Chat_Activity_RunningFormat" xml:space="preserve"><value>{0} wordt uitgevoerd</value></data>
+  <data name="Chat_Activity_Complete" xml:space="preserve"><value>Voltooid</value></data>
+  <data name="Chat_Activity_Expanded" xml:space="preserve"><value>Uitgevouwen</value></data>
+  <data name="Chat_Activity_Collapsed" xml:space="preserve"><value>Samengevouwen</value></data>
+  <data name="Chat_Activity_AutomationFormat" xml:space="preserve"><value>Activiteit: {0}. {1} hulpmiddelen. {2}.</value></data>
   <data name="Chat_Reasoning_ThinkingHeader" xml:space="preserve">
     <value>🧠 Denken</value>
   </data>
@@ -2940,6 +2964,9 @@ Gebruik een van deze opties:
   </data>
   <data name="Chat_Composer_Tooltip_More" xml:space="preserve">
     <value>Meer</value>
+  </data>
+  <data name="Chat_Composer_Tooltip_Settings" xml:space="preserve">
+    <value>Instellingen</value>
   </data>
   <data name="Chat_Composer_Tooltip_Send" xml:space="preserve">
     <value>Verzenden</value>
@@ -4632,7 +4659,7 @@ Opdrachten worden geblokkeerd zolang sandboxing niet beschikbaar is, omdat strik
     <value>Alle</value>
   </data>
   <data name="SessionsPage_ShowCompleted.Header" xml:space="preserve">
-    <value>Beëindigde sessies tonen</value>
+    <value>Voltooide sessies weergeven</value>
   </data>
   <data name="SessionsPage_ShowBackground.Header" xml:space="preserve">
     <value>Achtergrondsessies tonen</value>
@@ -4675,7 +4702,7 @@ Opdrachten worden geblokkeerd zolang sandboxing niet beschikbaar is, omdat strik
     <value>Sessies worden geladen…</value>
   </data>
   <data name="SessionsPage_NoActiveSessions.Text" xml:space="preserve">
-    <value>Geen actieve sessies</value>
+    <value>Geen sessies</value>
   </data>
   <data name="SessionsPage_Reset.Text" xml:space="preserve">
     <value>Resetten</value>
@@ -6140,7 +6167,7 @@ Controleer of de gateway actief is.</value>
     <value>Gateway authentication failed</value>
   </data>
   <data name="CommandCenter_BrowserProxyAuthMayNeed" xml:space="preserve">
-    <value>Browser proxy auth may need a gateway token</value>
+    <value>Browser control needs a gateway shared token</value>
   </data>
   <data name="CommandCenter_BrowserProxyHostNotDetected" xml:space="preserve">
     <value>Browser proxy host not detected</value>
@@ -6628,6 +6655,9 @@ Het binaire bestand wxc-exec is niet gevonden. {1} Als dit een ontwikkelaarsbuil
   <data name="ConnectionPage_NodePillState_Pending" xml:space="preserve">
     <value>Enabled, not active yet</value>
   </data>
+  <data name="ConnectionPage_NodePillState_NeedsGatewayToken" xml:space="preserve">
+    <value>Needs gateway shared token</value>
+  </data>
   <data name="ConnectionPage_NodePillState_Off" xml:space="preserve">
     <value>Off</value>
   </data>
@@ -6870,5 +6900,17 @@ Het binaire bestand wxc-exec is niet gevonden. {1} Als dit een ontwikkelaarsbuil
   </data>
   <data name="PermissionsPage_ExecPolicySaveFailed" xml:space="preserve">
     <value>Opslaan mislukt</value>
+  </data>
+  <data name="SessionsPage_Status_Working" xml:space="preserve">
+    <value>Bezig</value>
+  </data>
+  <data name="SessionsPage_Status_Ready" xml:space="preserve">
+    <value>Gereed</value>
+  </data>
+  <data name="SessionsPage_Status_NeedsAttention" xml:space="preserve">
+    <value>Heeft aandacht nodig</value>
+  </data>
+  <data name="SessionsPage_LastRunStopped" xml:space="preserve">
+    <value>Laatste uitvoering gestopt</value>
   </data>
 </root>

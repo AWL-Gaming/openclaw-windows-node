@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using OpenClaw.Chat;
 using OpenClaw.Shared;
 #if !OPENCLAW_TRAY_TESTS
@@ -76,7 +77,6 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         WriteIndented = true,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
-
     /// <summary>
     /// Process-wide cache mapping an attachment's filename to its raw image
     /// bytes. Populated by <see cref="SendMessageAsync"/> for image
@@ -118,6 +118,8 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
     private readonly HashSet<string> _historyLoaded = new();              // sessionKey
     private readonly HashSet<string> _historyInFlight = new();            // sessionKey
     private readonly HashSet<string> _authoritativeHistoryReloadPending = new(); // sessionKey
+    private readonly HashSet<string> _replacementHistoryReloadPending = new(); // sessionKey
+    private readonly Dictionary<string, long> _historyReplacementVersions = new(); // sessionKey -> replacement generation
     private CancellationTokenSource _historyGenerationCancellation = new();
     private long _historyConnectionVersion;
     private readonly Dictionary<string, Task> _pendingModelPatches = new(); // sessionKey -> in-flight model set/clear
@@ -1008,17 +1010,52 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
     public Task LoadHistoryAsync(string threadId, bool force = false, CancellationToken cancellationToken = default, bool authoritative = false)
         => LoadHistoryCoreAsync(threadId, force, cancellationToken, expectedConnectionVersion: null, authoritative: authoritative);
 
+    internal Task ReplaceHistoryAfterCheckpointRestoreAsync(
+        string threadId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(threadId);
+
+        ChatDataSnapshot snapshot;
+        lock (_gate)
+        {
+            if (_disposed)
+                return Task.CompletedTask;
+
+            _historyReplacementVersions[threadId] = GetHistoryReplacementVersionLocked(threadId) + 1;
+            _timelines[threadId] = ChatTimelineState.Initial();
+            _entryMeta.Remove(threadId);
+            _historyLoaded.Remove(threadId);
+            _historyRetryCount.Remove(threadId);
+            _authoritativeHistoryReloadPending.Remove(threadId);
+            _replacementHistoryReloadPending.Remove(threadId);
+            snapshot = BuildSnapshotLocked();
+        }
+
+        Publish(snapshot);
+        return LoadHistoryCoreAsync(
+            threadId,
+            force: true,
+            cancellationToken,
+            expectedConnectionVersion: null,
+            authoritative: false,
+            replacementReload: true);
+    }
+
     private async Task LoadHistoryCoreAsync(
         string threadId,
         bool force,
         CancellationToken cancellationToken,
         long? expectedConnectionVersion,
-        bool authoritative = false)
+        long? expectedHistoryReplacementVersion = null,
+        bool authoritative = false,
+        bool replacementReload = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrEmpty(threadId)) return;
 
         long requestResetVersion;
+        long requestHistoryReplacementVersion;
         long requestConnectionVersion;
         CancellationToken generationCancellationToken;
         CancellationTokenSource requestCancellation;
@@ -1030,14 +1067,22 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             {
                 return;
             }
+            if (expectedHistoryReplacementVersion is { } expectedReplacement &&
+                GetHistoryReplacementVersionLocked(threadId) != expectedReplacement)
+            {
+                return;
+            }
             if (!force && _historyLoaded.Contains(threadId)) return;
             if (!_historyInFlight.Add(threadId))
             {
-                if (authoritative)
+                if (replacementReload)
+                    _replacementHistoryReloadPending.Add(threadId);
+                else if (authoritative)
                     _authoritativeHistoryReloadPending.Add(threadId);
                 return;
             }
             requestResetVersion = GetResetVersionLocked(threadId);
+            requestHistoryReplacementVersion = GetHistoryReplacementVersionLocked(threadId);
             requestConnectionVersion = _historyConnectionVersion;
             generationCancellationToken = _historyGenerationCancellation.Token;
             requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(
@@ -1062,7 +1107,8 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             lock (_gate)
             {
                 if (_historyConnectionVersion != requestConnectionVersion ||
-                    GetResetVersionLocked(threadId) != requestResetVersion)
+                    GetResetVersionLocked(threadId) != requestResetVersion ||
+                    GetHistoryReplacementVersionLocked(threadId) != requestHistoryReplacementVersion)
                 {
                     Logger.Info($"[ChatHistory] Ignoring stale history for thread '{threadId}'");
                     historyOutcome = ChatTelemetryOutcome.Canceled;
@@ -1119,11 +1165,22 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
 
                 bool nextAssistantIsAborted = false;
                 var attachmentMatcher = CreateAttachmentMetaMatcher(history.SessionId, threadId);
+                var pendingUnkeyedToolCalls = new Queue<string>();
+                var syntheticToolCallSequence = 0;
+                ChatMessageInfo? suppressedAbortedAssistant = null;
 
-                foreach (var msg in ordered)
+                foreach (var replayPart in ChatHistoryReplayProjection.Project(ordered))
                 {
+                    var msg = replayPart.Message;
+                    if (suppressedAbortedAssistant is not null)
+                    {
+                        if (ReferenceEquals(suppressedAbortedAssistant, msg))
+                            continue;
+                        suppressedAbortedAssistant = null;
+                    }
+
                     var roleLower = msg.Role?.ToLowerInvariant() ?? "";
-                    var rawText = msg.Text ?? string.Empty;
+                    var rawText = replayPart.Text;
                     var ts = msg.Ts > 0
                         ? DateTimeOffset.FromUnixTimeMilliseconds(msg.Ts).ToLocalTime()
                         : (DateTimeOffset?)null;
@@ -1146,8 +1203,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                     var text = TruncateForChatEntry(EscapeUntrustedAttachmentMarkerLines(rawText));
                     if (roleLower == "user")
                         text = RehydrateAttachmentMarkers(attachmentMatcher, text, msg.Ts);
-
-                    if (string.IsNullOrEmpty(text)) continue;
+                    var hasStructuredToolContent = replayPart.ToolContent.Count > 0;
 
                     // Check if this user message was aborted (persisted __openclaw.id match)
                     if (roleLower == "user")
@@ -1164,18 +1220,36 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                         !string.Equals(msg.StopReason, "toolUse", StringComparison.OrdinalIgnoreCase) &&
                         !string.Equals(msg.StopReason, "end_turn", StringComparison.OrdinalIgnoreCase);
 
-                    bool shouldMarkAborted = (roleLower == "assistant" && nextAssistantIsAborted) || gatewayAborted;
-                    if (roleLower == "assistant") nextAssistantIsAborted = false; // reset after consuming
+                    var isFirstAssistantPart = roleLower == "assistant" && replayPart.IsFirstPart;
+                    var shouldSuppressAssistant = isFirstAssistantPart
+                        && (nextAssistantIsAborted || gatewayAborted);
+                    if (isFirstAssistantPart)
+                        nextAssistantIsAborted = false;
+                    if (shouldSuppressAssistant)
+                    {
+                        Logger.Debug("[ChatHistory]   → routed: ABORTED (response was stopped)");
+                        rebuilt = ApplyAndCaptureMeta(
+                            rebuilt,
+                            new ChatStatusEvent("Response was stopped", ChatTone.Warning),
+                            msgMeta);
+                        rebuilt = ChatTimelineReducer.Apply(rebuilt, new ChatTurnEndEvent());
+                        suppressedAbortedAssistant = msg;
+                        continue;
+                    }
+
+                    if (string.IsNullOrEmpty(text) && !hasStructuredToolContent) continue;
 
                     // Diagnostic: log shape (role + length + heuristic flags) only.
                     // Never log the message text — see HIGH 4 logging audit.
-                    var isFlat = LooksLikeFlattenedToolOutput(text);
-                    var isSys  = LooksLikeSystemControlNote(text);
-                    Logger.Debug($"[ChatHistory] role='{roleLower}' len={text.Length} flat={isFlat} sys={isSys} aborted={shouldMarkAborted}");
+                    var isFlat = NativeToolProjector.LooksLikeFlattenedToolOutput(text);
+                    var isSys  = NativeToolProjector.LooksLikeSystemControlNote(text);
+                    Logger.Debug($"[ChatHistory] role='{roleLower}' len={text.Length} flat={isFlat} sys={isSys}");
 
-                    switch (roleLower)
+                    if (!string.IsNullOrEmpty(text))
                     {
-                        case "user":
+                        switch (roleLower)
+                        {
+                            case "user":
                             // Approval slash commands ("/approve <slug> allow-once",
                             // "/deny <slug>") are transport, not user prose. On
                             // history replay we render them as a dim audit-trail
@@ -1190,13 +1264,13 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                                     rebuilt,
                                     new ChatStatusEvent(text, ChatTone.Dim),
                                     msgMeta);
-                                break;
+                                    break;
                             }
                             // System-injected notes (the gateway sometimes wraps
                             // exec result reports in ``System (untrusted): ...``
                             // and sends them as role=user) — render dim instead
                             // of as a giant user bubble. See the ChatHistory log.
-                            if (LooksLikeSystemControlNote(text))
+                            if (NativeToolProjector.LooksLikeSystemControlNote(text))
                             {
                                 Logger.Debug($"[ChatHistory]   → routed: SYSTEM (dim status, role=user with control prefix)");
                                 rebuilt = ApplyAndCaptureMeta(
@@ -1214,32 +1288,20 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                             rebuilt = ApplyAndCaptureMeta(rebuilt, new ChatUserMessageEvent(text), msgMeta);
                             break;
 
-                        case "assistant":
+                            case "assistant":
                             if (ChatMessageInfo.IsSilentAssistantDirective(roleLower, text))
                             {
                                 Logger.Debug("[ChatHistory]   → routed: SILENT assistant directive");
-                                break;
+                                    break;
                             }
 
-                            // If this assistant response was aborted, show a placeholder
-                            // instead of the actual (partial) content.
-                            if (shouldMarkAborted)
-                            {
-                                Logger.Debug($"[ChatHistory]   → routed: ABORTED (response was stopped)");
-                                rebuilt = ApplyAndCaptureMeta(
-                                    rebuilt,
-                                    new ChatStatusEvent("Response was stopped", ChatTone.Warning),
-                                    msgMeta);
-                                rebuilt = ChatTimelineReducer.Apply(rebuilt, new ChatTurnEndEvent());
-                                break;
-                            }
                             // ── Heuristic recovery for history-flattened tool calls ──
                             // The gateway strips ``stream:"item"`` / ``command_output``
                             // detail server-side when serving ``chat.history`` —
                             // raw exec output is replayed as plain assistant text.
                             // Detect these telltale shapes and route them through
                             // the chip pipeline so historic turns look like live ones.
-                            if (LooksLikeSystemControlNote(text))
+                            if (NativeToolProjector.LooksLikeSystemControlNote(text))
                             {
                                 Logger.Debug($"[ChatHistory]   → routed: SYSTEM (dim status)");
                                 rebuilt = ApplyAndCaptureMeta(
@@ -1248,32 +1310,60 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                                     msgMeta);
                                 break;
                             }
-                            if (LooksLikeFlattenedToolOutput(text))
+                            if (NativeToolProjector.LooksLikeFlattenedToolOutput(text))
                             {
                                 var cached = TryMatchCachedTool(cachedTools, msg.Ts);
-                                var kind = cached?.ToolName ?? ClassifyFlattenedToolOutput(text);
-                                var label = cached?.Label ?? ExtractFlattenedToolSummary(text);
+                                var kind = cached?.ToolName ?? NativeToolProjector.ClassifyFlattenedToolOutput(text);
+                                var label = cached?.Label ?? NativeToolProjector.ExtractFlattenedToolSummary(text);
                                 Logger.Debug($"[ChatHistory]   → routed: TOOL chip kind='{kind}' cached={cached is not null}");
                                 rebuilt = ApplyAndCaptureMeta(
                                     rebuilt,
-                                    new ChatToolStartEvent(label, kind),
+                                    new ChatToolStartEvent(
+                                        label,
+                                        kind,
+                                        ToolArgs: cached?.ToolArgs,
+                                        ToolCallId: cached?.ToolCallId,
+                                        IdentityStrength: cached?.IdentityStrength ?? NativeToolProjector.ClassifyHistoryIdentityStrength(kind),
+                                        RunId: cached?.RunId),
                                     msgMeta);
                                 rebuilt = ApplyAndCaptureMeta(
                                     rebuilt,
-                                    new ChatToolOutputEvent(text),
+                                    new ChatToolOutputEvent(
+                                        text,
+                                        ToolCallId: cached?.ToolCallId,
+                                        RunId: cached?.RunId),
                                     msgMeta);
                                 break;
                             }
                             Logger.Debug($"[ChatHistory]   → routed: ASSISTANT bubble (no flatten/system match)");
                             rebuilt = ApplyAndCaptureMeta(rebuilt, new ChatMessageEvent(RepairContentBlockSeams(text)), msgMeta);
-                            // End the turn so the next assistant message starts a new
-                            // entry rather than replacing this one (UpsertAssistant
-                            // upserts by ActiveAssistantId, which TurnEnd clears).
-                            rebuilt = ChatTimelineReducer.Apply(rebuilt, new ChatTurnEndEvent());
+                            if (rebuilt.ActiveToolCalls.Count > 0
+                                || rebuilt.ActiveToolCallId is not null)
+                            {
+                                // Text can be interleaved between a tool start and its
+                                // result in one array-valued history message. Preserve
+                                // tool correlation while ensuring later text becomes a
+                                // separate chronological entry.
+                                rebuilt = rebuilt with
+                                {
+                                    ActiveAssistantId = null,
+                                    ActiveReasoningId = null,
+                                };
+                            }
+                            else
+                            {
+                                // End the turn so the next assistant message starts a new
+                                // entry rather than replacing this one (UpsertAssistant
+                                // upserts by ActiveAssistantId, which TurnEnd clears).
+                                rebuilt = ChatTimelineReducer.Apply(rebuilt, new ChatTurnEndEvent());
+                            }
                             break;
 
-                        case "toolresult":
-                        case "tool_result":
+                            case "toolresult":
+                            case "tool_result":
+                                if (hasStructuredToolContent)
+                                    break;
+
                             // Verified empirically — gateway 2026.4.x emits
                             // ``role: "toolresult"`` for shell/exec tool output
                             // in chat.history (not the spec's ``"tool"``).
@@ -1282,22 +1372,31 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                             // it's tool output.
                             {
                                 var cached = TryMatchCachedTool(cachedTools, msg.Ts);
-                                var kind = cached?.ToolName ?? ClassifyFlattenedToolOutput(text);
-                                var label = cached?.Label ?? ExtractFlattenedToolSummary(text);
+                                var kind = cached?.ToolName ?? NativeToolProjector.ClassifyFlattenedToolOutput(text);
+                                var label = cached?.Label ?? NativeToolProjector.ExtractFlattenedToolSummary(text);
                                 Logger.Debug($"[ChatHistory]   → routed: TOOL chip (role=toolresult, kind='{kind}' cached={cached is not null})");
                                 rebuilt = ApplyAndCaptureMeta(
                                     rebuilt,
-                                    new ChatToolStartEvent(label, kind),
+                                    new ChatToolStartEvent(
+                                        label,
+                                        kind,
+                                        ToolArgs: cached?.ToolArgs,
+                                        ToolCallId: cached?.ToolCallId,
+                                        IdentityStrength: cached?.IdentityStrength ?? NativeToolProjector.ClassifyHistoryIdentityStrength(kind),
+                                        RunId: cached?.RunId),
                                     msgMeta);
                                 rebuilt = ApplyAndCaptureMeta(
                                     rebuilt,
-                                    new ChatToolOutputEvent(text),
+                                    new ChatToolOutputEvent(
+                                        text,
+                                        ToolCallId: cached?.ToolCallId,
+                                        RunId: cached?.RunId),
                                     msgMeta);
                             }
-                            break;
+                                break;
 
-                        case "system":
-                        case "tool":
+                            case "system":
+                            case "tool":
                             // Render system / tool transcript notes as muted Status
                             // entries so they're visible but de-emphasized vs. the
                             // user/assistant turn flow.
@@ -1306,16 +1405,75 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                                 rebuilt,
                                 new ChatStatusEvent(text, ChatTone.Dim),
                                 msgMeta);
-                            break;
+                                break;
 
-                        default:
+                            default:
                             // Unknown role — fall back to assistant rendering so it's
                             // at least visible. Bracket with TurnEnd to avoid
                             // collapsing into adjacent assistant entries.
                             Logger.Debug($"[ChatHistory]   → routed: ASSISTANT (unknown role '{roleLower}', fallback)");
                             rebuilt = ApplyAndCaptureMeta(rebuilt, new ChatMessageEvent(RepairContentBlockSeams(text)), msgMeta);
                             rebuilt = ChatTimelineReducer.Apply(rebuilt, new ChatTurnEndEvent());
-                            break;
+                                break;
+                        }
+                    }
+
+                    foreach (var toolBlock in replayPart.ToolContent)
+                    {
+                        if (toolBlock.Kind == ChatToolContentKind.Call)
+                        {
+                            _ = TryMatchCachedTool(cachedTools, msg.Ts);
+                            var args = ConvertToolArgs(toolBlock.Args);
+                            var callId = toolBlock.CallId;
+                            if (string.IsNullOrWhiteSpace(callId))
+                            {
+                                callId = $"history-tool-{syntheticToolCallSequence++}";
+                                pendingUnkeyedToolCalls.Enqueue(callId);
+                            }
+                            rebuilt = ApplyAndCaptureMeta(
+                                rebuilt,
+                                new ChatToolStartEvent(
+                                    ToolLabel(toolBlock.ToolName, args),
+                                    toolBlock.ToolName,
+                                    args,
+                                    callId),
+                                msgMeta);
+                        }
+                        else
+                        {
+                            var callId = toolBlock.CallId;
+                            if (string.IsNullOrWhiteSpace(callId))
+                            {
+                                callId = pendingUnkeyedToolCalls.Count > 0
+                                    ? pendingUnkeyedToolCalls.Dequeue()
+                                    : $"history-tool-{syntheticToolCallSequence++}";
+                            }
+
+                            var correlationKey = new ChatToolCorrelationKey(
+                                RunId: null,
+                                LegacyTurn: rebuilt.ToolLegacyTurn,
+                                ToolCallId: callId);
+                            if (!rebuilt.ActiveToolCalls.ContainsKey(correlationKey))
+                            {
+                                var cached = TryMatchCachedTool(cachedTools, msg.Ts);
+                                var toolName = cached?.ToolName ?? toolBlock.ToolName;
+                                rebuilt = ApplyAndCaptureMeta(
+                                    rebuilt,
+                                    new ChatToolStartEvent(
+                                        cached?.Label ?? toolName,
+                                        toolName,
+                                        ToolCallId: callId),
+                                    msgMeta);
+                            }
+
+                            var output = NativeToolProjector.TruncateToolOutput(toolBlock.Text ?? string.Empty);
+                            rebuilt = ApplyAndCaptureMeta(
+                                rebuilt,
+                                toolBlock.IsError
+                                    ? new ChatToolErrorEvent(output, callId)
+                                    : new ChatToolOutputEvent(output, callId),
+                                msgMeta);
+                        }
                     }
                 }
                 // If the last user message was aborted but there's no subsequent
@@ -1331,8 +1489,9 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                     rebuilt = ChatTimelineReducer.Apply(rebuilt, new ChatTurnEndEvent());
                 }
 
-                // Final safety: ensure no lingering active turn after history load.
-                rebuilt = rebuilt with { TurnActive = false, ActiveAssistantId = null, ActiveReasoningId = null };
+                // Final safety: close the replayed turn and mark calls that never
+                // received a result as interrupted instead of leaving them running.
+                rebuilt = ChatTimelineReducer.Apply(rebuilt, new ChatTurnEndEvent());
 
                 // Append any prior live entries that weren't part of history.
                 // Dedup rules (HIGH 2 / rubber-duck round 2):
@@ -1490,8 +1649,15 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                     {
                         Entries = newEntries.ToImmutable(),
                         NextId = nextId,
-                        TurnActive = prior.TurnActive
+                        TurnActive = prior.TurnActive,
+                        PendingToolPresentations = prior.PendingToolPresentations,
+                        PendingToolOutcomes = prior.PendingToolOutcomes,
+                        TerminalToolCorrelations = prior.TerminalToolCorrelations,
+                        NextToolOutcomeSequence = prior.NextToolOutcomeSequence,
+                        NextToolCorrelationSequence = prior.NextToolCorrelationSequence,
+                        ToolLegacyTurn = prior.ToolLegacyTurn
                     };
+                    rebuilt = ChatTimelineReducer.RebuildActiveToolTracking(rebuilt);
                 }
 
                 _timelines[threadId] = rebuilt;
@@ -1515,7 +1681,9 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             bool shouldRetry;
             lock (_gate)
             {
-                if (_disposed || _historyConnectionVersion != requestConnectionVersion)
+                if (_disposed ||
+                    _historyConnectionVersion != requestConnectionVersion ||
+                    GetHistoryReplacementVersionLocked(threadId) != requestHistoryReplacementVersion)
                 {
                     historyOutcome = ChatTelemetryOutcome.Canceled;
                     return;
@@ -1525,7 +1693,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 historyException = ex;
                 _historyRetryCount.TryGetValue(threadId, out var retries);
                 shouldRetry = _status == ConnectionStatus.Connected
-                              && (authoritative || !_historyLoaded.Contains(threadId))
+                              && (replacementReload || authoritative || !_historyLoaded.Contains(threadId))
                               && retries < MaxHistoryRetries;
                 if (shouldRetry)
                     _historyRetryCount[threadId] = retries + 1;
@@ -1534,7 +1702,9 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             _historyFailureReservedForTesting?.Invoke();
             lock (_gate)
             {
-                if (_disposed || _historyConnectionVersion != requestConnectionVersion)
+                if (_disposed ||
+                    _historyConnectionVersion != requestConnectionVersion ||
+                    GetHistoryReplacementVersionLocked(threadId) != requestHistoryReplacementVersion)
                 {
                     historyOutcome = ChatTelemetryOutcome.Canceled;
                     historyException = null;
@@ -1549,11 +1719,15 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                     threadId,
                     LocalizationHelper.GetString("Chat_Notification_LoadHistoryFailed"),
                     ex.Message),
-                requestConnectionVersion);
+                threadId,
+                requestConnectionVersion,
+                requestHistoryReplacementVersion);
 
             lock (_gate)
             {
-                if (_disposed || _historyConnectionVersion != requestConnectionVersion)
+                if (_disposed ||
+                    _historyConnectionVersion != requestConnectionVersion ||
+                    GetHistoryReplacementVersionLocked(threadId) != requestHistoryReplacementVersion)
                 {
                     historyOutcome = ChatTelemetryOutcome.Canceled;
                     historyException = null;
@@ -1576,28 +1750,44 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                         force: true,
                         CancellationToken.None,
                         expectedConnectionVersion: requestConnectionVersion,
-                        authoritative: authoritative);
+                        expectedHistoryReplacementVersion: requestHistoryReplacementVersion,
+                        authoritative: authoritative,
+                        replacementReload: replacementReload);
                 }));
             }
         }
         finally
         {
+            bool rerunReplacement;
             bool rerunAuthoritative;
             lock (_gate)
             {
                 if (_historyConnectionVersion == requestConnectionVersion)
                 {
                     _historyInFlight.Remove(threadId);
-                    rerunAuthoritative = _authoritativeHistoryReloadPending.Remove(threadId);
+                    rerunReplacement = _replacementHistoryReloadPending.Remove(threadId);
+                    rerunAuthoritative = !rerunReplacement
+                        && _authoritativeHistoryReloadPending.Remove(threadId);
                 }
                 else
                 {
-                    // Generation advance owns clearing pending authoritative state.
+                    // Generation advance owns clearing pending reload state.
+                    rerunReplacement = false;
                     rerunAuthoritative = false;
                 }
             }
             _telemetry.FinishHistoryLoad(historyOperation, historyOutcome, historyException);
-            if (rerunAuthoritative)
+            if (rerunReplacement)
+            {
+                _ = LoadHistoryCoreAsync(
+                    threadId,
+                    force: true,
+                    CancellationToken.None,
+                    expectedConnectionVersion: requestConnectionVersion,
+                    authoritative: false,
+                    replacementReload: true);
+            }
+            else if (rerunAuthoritative)
                 _ = LoadHistoryAsync(threadId, force: true, authoritative: true);
         }
     }
@@ -1660,7 +1850,9 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
 
     private void RaiseHistoryNotificationIfCurrent(
         ChatProviderNotification notification,
-        long requestConnectionVersion)
+        string threadId,
+        long requestConnectionVersion,
+        long requestHistoryReplacementVersion)
     {
         var args = new ChatProviderNotificationEventArgs(notification);
 
@@ -1668,7 +1860,9 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         {
             lock (_gate)
             {
-                if (_disposed || _historyConnectionVersion != requestConnectionVersion)
+                if (_disposed ||
+                    _historyConnectionVersion != requestConnectionVersion ||
+                    GetHistoryReplacementVersionLocked(threadId) != requestHistoryReplacementVersion)
                     return;
             }
 
@@ -2065,6 +2259,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         ChatDataSnapshot snapshot;
         bool justReconnected;
         string[] threadsToInterrupt;
+        string[] threadsToReset;
         CancellationTokenSource? historyGenerationToCancel = null;
         lock (_gate)
         {
@@ -2076,7 +2271,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             // MEDIUM 5: detect Connected → Disconnected/Error transitions so
             // we can synthesise a turn-end + status entry on every thread that
             // had an in-flight turn (otherwise the UI sits "thinking" forever).
-            var justDisconnected = (status == ConnectionStatus.Disconnected || status == ConnectionStatus.Error)
+            var justDisconnected = status != ConnectionStatus.Connected
                                    && _status == ConnectionStatus.Connected;
             _status = status;
 
@@ -2125,6 +2320,12 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 _resetSubmittedLocalEchoTexts.Clear();
                 _activeRunIds.Clear();
                 _activeRunStartSequences.Clear();
+                foreach (var threadId in _timelines.Keys.ToArray())
+                {
+                    _timelines[threadId] = ChatTimelineReducer.Apply(
+                        _timelines[threadId],
+                        new ChatToolReplayResetEvent());
+                }
                 // Reset keyless-event diagnostic so a fresh reconnect to a
                 // still-broken gateway surfaces the notification again.
                 System.Threading.Interlocked.Exchange(ref _keylessEventDiagnosticRaised, 0);
@@ -2139,6 +2340,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                     if (tl.TurnActive) list.Add(key);
                 }
                 threadsToInterrupt = list.ToArray();
+                threadsToReset = _timelines.Keys.ToArray();
                 foreach (var threadId in threadsToInterrupt)
                 {
                     _activeRunIds.Remove(threadId);
@@ -2148,6 +2350,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             else
             {
                 threadsToInterrupt = Array.Empty<string>();
+                threadsToReset = Array.Empty<string>();
             }
 
             snapshot = BuildSnapshotLocked();
@@ -2163,6 +2366,21 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             ApplyEventAndPublish(threadId, new ChatStatusEvent(interruptedMsg, ChatTone.Warning));
             ApplyEventAndPublish(threadId, new ChatTurnEndEvent());
         }
+        if (threadsToReset.Length > 0)
+        {
+            lock (_gate)
+            {
+                foreach (var threadId in threadsToReset)
+                {
+                    if (_timelines.TryGetValue(threadId, out var timeline))
+                    {
+                        _timelines[threadId] = ChatTimelineReducer.Apply(
+                            timeline,
+                            new ChatToolReplayResetEvent());
+                    }
+                }
+            }
+        }
 
     }
 
@@ -2175,6 +2393,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         _historyInFlight.Clear();
         _historyRetryCount.Clear();
         _authoritativeHistoryReloadPending.Clear();
+        _replacementHistoryReloadPending.Clear();
         if (clearLoaded)
             _historyLoaded.Clear();
         return previousCancellation;
@@ -2503,7 +2722,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 return;
             }
 
-            if (LooksLikeSystemControlNote(rawText))
+            if (NativeToolProjector.LooksLikeSystemControlNote(rawText))
             {
                 if (string.IsNullOrEmpty(message.Text)) return;
                 var sysThread = message.SessionKey;
@@ -2591,13 +2810,19 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 _activeRunIds.TryGetValue(trThread, out trRunId);
             }
             var capped = TruncateForChatEntry(message.Text);
-            var kind = ClassifyFlattenedToolOutput(capped);
-            var label = ExtractFlattenedToolSummary(capped);
+            var kind = NativeToolProjector.ClassifyFlattenedToolOutput(capped);
+            var label = NativeToolProjector.ExtractFlattenedToolSummary(capped);
             _telemetry.ObserveInboundOutput(
                 trThread,
                 trRunId,
                 ChatResponseOutputKind.Tool);
-            ApplyEventAndPublish(trThread, new ChatToolStartEvent(label, kind), trMeta);
+            ApplyEventAndPublish(
+                trThread,
+                new ChatToolStartEvent(
+                    label,
+                    kind,
+                    IdentityStrength: NativeToolProjector.ClassifyHistoryIdentityStrength(kind)),
+                trMeta);
             ApplyEventAndPublish(trThread, new ChatToolOutputEvent(capped), trMeta);
             return;
         }
@@ -2913,21 +3138,100 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 outputKind.Value);
         }
 
-        // Cache tool metadata from live SSE events so it survives app restarts.
-        if (mapped is ChatToolStartEvent toolStart && !string.IsNullOrEmpty(toolStart.ToolName))
-        {
-            var tsMs0 = evt.Ts > 0 ? (long)evt.Ts : 0L;
-            CacheToolMeta(threadId, tsMs0, toolStart.ToolName, toolStart.Text);
-        }
-
         // AgentEventInfo.Ts is a double of unix-epoch ms (per OpenClawGatewayClient).
         var tsMs = evt.Ts > 0 ? (long)evt.Ts : 0L;
         ChatEntryMetadata? meta;
         lock (_gate) { meta = BuildLiveMetaLocked(threadId, tsMs); }
 
         ApplyEventAndPublish(threadId, mapped, meta);
+        CacheMappedToolMetadata(threadId, mapped, tsMs);
         if (isTerminalRunEvent)
             ScheduleQueuedSendDrain(threadId);
+    }
+
+    private void CacheMappedToolMetadata(string threadId, ChatEvent mapped, long tsMs)
+    {
+        if (mapped is not ChatToolStartEvent and not ChatToolPresentationEvent)
+            return;
+
+        var legacyTurn = ResolveToolCacheLegacyTurn(threadId, mapped);
+        if (mapped is ChatToolStartEvent toolStart && !string.IsNullOrEmpty(toolStart.ToolName))
+        {
+            CacheToolMeta(
+                threadId,
+                tsMs,
+                toolStart.ToolName,
+                toolStart.Text,
+                toolStart.ToolCallId,
+                toolStart.ToolArgs,
+                toolStart.IdentityStrength,
+                toolStart.RunId,
+                legacyTurn);
+        }
+        else if (mapped is ChatToolPresentationEvent presentation)
+        {
+            CacheToolMeta(
+                threadId,
+                tsMs,
+                presentation.ToolName,
+                NativeToolProjector.FirstToolDisplayValue(presentation.ToolArgs),
+                presentation.ParentToolCallId,
+                presentation.ToolArgs,
+                presentation.IdentityStrength,
+                presentation.RunId,
+                legacyTurn);
+        }
+    }
+
+    private long ResolveToolCacheLegacyTurn(string threadId, ChatEvent mapped)
+    {
+        var runId = mapped switch
+        {
+            ChatToolStartEvent start => start.RunId,
+            ChatToolPresentationEvent presentation => presentation.RunId,
+            _ => null
+        };
+        if (!string.IsNullOrWhiteSpace(runId))
+            return 0;
+
+        lock (_gate)
+        {
+            if (!_timelines.TryGetValue(threadId, out var timeline))
+                return ChatTimelineState.Initial().ToolLegacyTurn;
+
+            var toolCallId = mapped switch
+            {
+                ChatToolStartEvent start => start.ToolCallId,
+                ChatToolPresentationEvent presentation => presentation.ParentToolCallId,
+                _ => null
+            };
+            if (string.IsNullOrWhiteSpace(toolCallId))
+                return timeline.ToolLegacyTurn;
+
+            if (mapped is ChatToolPresentationEvent)
+            {
+                var pendingKey = timeline.PendingToolPresentations?.Keys
+                    .Where(key => key.RunId is null
+                        && string.Equals(key.ToolCallId, toolCallId, StringComparison.Ordinal))
+                    .OrderByDescending(key => key.LegacyTurn)
+                    .FirstOrDefault();
+                if (pendingKey is { ToolCallId.Length: > 0 })
+                    return pendingKey.Value.LegacyTurn;
+            }
+
+            for (var i = timeline.Entries.Count - 1; i >= 0; i--)
+            {
+                var entry = timeline.Entries[i];
+                if (entry.Kind != ChatTimelineItemKind.ToolCall || entry.ToolRunId is not null)
+                    continue;
+                if (string.Equals(entry.ToolCallId, toolCallId, StringComparison.Ordinal)
+                    || entry.ToolCorrelationIds?.Contains(toolCallId) == true)
+                {
+                    return entry.ToolLegacyTurn;
+                }
+            }
+            return timeline.ToolLegacyTurn;
+        }
     }
 
     private static ChatResponseOutputKind? ClassifyInboundOutput(
@@ -3932,7 +4236,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 var role = (history.Messages[i].Role ?? "").ToLowerInvariant();
                 var hText = history.Messages[i].Text;
                 if (role == "user"
-                    && !LooksLikeSystemControlNote(hText)
+                    && !NativeToolProjector.LooksLikeSystemControlNote(hText)
                     && !LooksLikeApprovalSlashCommand(hText))
                 {
                     lastUser = history.Messages[i];
@@ -4369,16 +4673,29 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         if (evt.Data.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
 
         var phase = evt.Data.TryGetProperty("phase", out var phaseProp) ? phaseProp.GetString() ?? "" : "";
-        var toolName = evt.Data.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "";
-        var label = ExtractToolLabel(evt.Data);
+        var identity = NativeToolProjector.ExtractToolIdentity(evt.Data);
+        var toolArgs = NativeToolProjector.ExtractSafeToolDisplayArgs(evt.Data);
+        var label = NativeToolProjector.ExtractToolLabel(evt.Data, toolArgs);
         var toolCallId = evt.Data.TryGetProperty("itemId", out var idProp) ? idProp.GetString()
             : (evt.Data.TryGetProperty("callId", out var cProp) ? cProp.GetString() : null);
 
         return phase.ToLowerInvariant() switch
         {
-            "start" => new ChatToolStartEvent(label, toolName, ToolCallId: toolCallId),
-            "result" => new ChatToolOutputEvent(ExtractToolResultText(evt.Data, fallback: label), ToolCallId: toolCallId),
-            "error" => new ChatToolErrorEvent(ExtractToolErrorText(evt.Data, fallback: label), ToolCallId: toolCallId),
+            "start" => new ChatToolStartEvent(
+                label,
+                identity.Name,
+                ToolArgs: toolArgs,
+                ToolCallId: toolCallId,
+                IdentityStrength: identity.Strength,
+                RunId: evt.RunId),
+            "result" => new ChatToolOutputEvent(
+                NativeToolProjector.ExtractToolResultText(evt.Data, fallback: label),
+                ToolCallId: toolCallId,
+                RunId: evt.RunId),
+            "error" => new ChatToolErrorEvent(
+                NativeToolProjector.ExtractToolErrorText(evt.Data, fallback: label),
+                ToolCallId: toolCallId,
+                RunId: evt.RunId),
             _ => null
         };
     }
@@ -4401,9 +4718,8 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
     /// }
     /// </code>
     ///
-    /// We only surface ``kind: "tool"`` items as chips; ``kind: "command"``
-    /// items are children of the parent tool whose output stream is
-    /// ``command_output`` (handled separately).
+    /// Tool items create chips. Command children upgrade the parent chip with
+    /// their specific identity and bounded safe display arguments.
     /// </summary>
     private static ChatEvent? MapItemEvent(AgentEventInfo evt)
     {
@@ -4427,23 +4743,94 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 : null;
         }
 
+        if (string.Equals(kind, "command", StringComparison.OrdinalIgnoreCase))
+        {
+            var normalizedPhase = phase.ToLowerInvariant();
+            if (normalizedPhase is not ("start" or "update"))
+                return null;
+
+            var parentItemId = NativeToolProjector.ExtractParentToolCallId(evt.Data);
+            if (string.IsNullOrWhiteSpace(parentItemId))
+                return null;
+
+            var childIdentity = NativeToolProjector.ExtractToolIdentity(evt.Data);
+            var commandArgs = NativeToolProjector.ExtractSafeToolDisplayArgs(evt.Data);
+            var childItemId = NativeToolProjector.GetStringProperty(evt.Data, "itemId", "commandItemId", "callId");
+            return new ChatToolPresentationEvent(
+                parentItemId,
+                childIdentity.Name,
+                childIdentity.Strength,
+                commandArgs,
+                childItemId,
+                ActivatesTurn: normalizedPhase == "start",
+                RunId: evt.RunId);
+        }
+
         if (!string.Equals(kind, "tool", StringComparison.OrdinalIgnoreCase))
             return null;
 
-        var title = evt.Data.TryGetProperty("title", out var titleProp) ? titleProp.GetString() ?? "" : "";
-        var toolName = ExtractToolKindFromTitle(title);
-        var itemId = evt.Data.TryGetProperty("itemId", out var idProp) ? idProp.GetString() : null;
+        var title = NativeToolProjector.GetStringProperty(evt.Data, "title");
+        var identity = NativeToolProjector.ExtractToolIdentity(evt.Data);
+        var toolArgs = NativeToolProjector.ExtractSafeToolDisplayArgs(evt.Data);
+        var label = NativeToolProjector.FirstToolDisplayValue(toolArgs);
+        if (string.IsNullOrWhiteSpace(label))
+            label = NativeToolProjector.SanitizeToolDisplayValue(title);
+        string? itemId = NativeToolProjector.GetStringProperty(evt.Data, "itemId", "callId");
+        if (string.IsNullOrWhiteSpace(itemId))
+            itemId = null;
 
         return phase.ToLowerInvariant() switch
         {
-            "start" => new ChatToolStartEvent(title, toolName, ToolCallId: itemId),
+            "start" => new ChatToolStartEvent(
+                label,
+                identity.Name,
+                ToolArgs: toolArgs,
+                ToolCallId: itemId,
+                IdentityStrength: identity.Strength,
+                RunId: evt.RunId),
             // ``end`` flips the active tool's status to Success even when no
             // command_output arrived (e.g. ``read``, ``glob`` — non-shell).
             // Use the title as a no-op output so the reducer marks Success.
-            "end" => new ChatToolOutputEvent(string.Empty, ToolCallId: itemId),
-            "error" => new ChatToolErrorEvent(title, ToolCallId: itemId),
+            "end" => new ChatToolOutputEvent(string.Empty, ToolCallId: itemId, RunId: evt.RunId),
+            "error" => new ChatToolErrorEvent(
+                NativeToolProjector.SanitizeToolDisplayValue(title),
+                ToolCallId: itemId,
+                RunId: evt.RunId),
             _ => null
         };
+    }
+
+    private static JsonObject? ConvertToolArgs(JsonElement? value)
+    {
+        if (value is not { ValueKind: JsonValueKind.Object } args)
+            return null;
+        return NativeToolProjector.ExtractSafeToolDisplayArgs(args);
+    }
+
+    private static string ToolLabel(string toolName, JsonObject? args)
+    {
+        foreach (var key in new[] { "command", "path", "file_path", "query", "url", "pattern" })
+        {
+            if (args?[key] is JsonValue value
+                && value.TryGetValue<string>(out var text)
+                && !string.IsNullOrWhiteSpace(text))
+            {
+                return TruncateToolLabel(text);
+            }
+        }
+
+        return toolName;
+    }
+
+    private static string TruncateToolLabel(string text)
+    {
+        if (text.Length <= 80)
+            return text;
+
+        var length = 77;
+        if (char.IsHighSurrogate(text[length - 1]))
+            length--;
+        return text[..length] + "\u2026";
     }
 
     /// <summary>
@@ -4462,7 +4849,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         if (!string.Equals(phase, "end", StringComparison.OrdinalIgnoreCase))
             return null;
 
-        var output = ExtractCommandOutputText(evt.Data);
+        var output = NativeToolProjector.ExtractCommandOutputText(evt.Data);
         if (string.IsNullOrEmpty(output))
             return null;
 
@@ -4471,61 +4858,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         var itemId = evt.Data.TryGetProperty("parentItemId", out var pidProp) ? pidProp.GetString()
             : (evt.Data.TryGetProperty("itemId", out var idProp) ? idProp.GetString() : null);
 
-        return new ChatToolOutputEvent(output, ToolCallId: itemId);
-    }
-
-    /// <summary>
-    /// Pull a short ``kind`` token out of the gateway's free-form ``title``
-    /// for display in the chip header. Titles look like
-    /// ``"exec run command ..."`` or ``"read ./foo"`` — we take the first
-    /// token before whitespace, lower-cased.
-    /// </summary>
-    private static string ExtractToolKindFromTitle(string title)
-    {
-        if (string.IsNullOrWhiteSpace(title)) return "tool";
-        var space = title.IndexOf(' ');
-        var head = space > 0 ? title[..space] : title;
-        return head.ToLowerInvariant();
-    }
-
-    /// <summary>
-    /// Extract a printable text payload from a ``command_output`` end event.
-    /// Walks the common fields the gateway uses: ``output``, ``text``,
-    /// ``content``, ``stdout``, ``stderr``, ``preview``, ``body``.
-    /// </summary>
-    private static string ExtractCommandOutputText(System.Text.Json.JsonElement data)
-    {
-        foreach (var key in new[] { "output", "text", "content", "stdout", "preview", "body", "stderr" })
-        {
-            if (data.TryGetProperty(key, out var v))
-            {
-                if (v.ValueKind == System.Text.Json.JsonValueKind.String)
-                {
-                    var s = v.GetString();
-                    if (!string.IsNullOrEmpty(s))
-                        return TruncateForToolOutput(s);
-                }
-                else if (v.ValueKind == System.Text.Json.JsonValueKind.Object &&
-                         v.TryGetProperty("text", out var inner) &&
-                         inner.ValueKind == System.Text.Json.JsonValueKind.String)
-                {
-                    var s = inner.GetString();
-                    if (!string.IsNullOrEmpty(s))
-                        return TruncateForToolOutput(s);
-                }
-            }
-        }
-
-        // Fall back to the title field so the chip body isn't empty.
-        if (data.TryGetProperty("title", out var titleProp) &&
-            titleProp.ValueKind == System.Text.Json.JsonValueKind.String)
-        {
-            var s = titleProp.GetString();
-            if (!string.IsNullOrEmpty(s))
-                return TruncateForToolOutput(s);
-        }
-
-        return string.Empty;
+        return new ChatToolOutputEvent(output, ToolCallId: itemId, RunId: evt.RunId);
     }
 
     private static ChatEvent? MapJobEvent(AgentEventInfo evt)
@@ -4538,83 +4871,6 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             "error" => new ChatErrorEvent(evt.Summary ?? "Agent error"),
             _ => null
         };
-    }
-
-    private static string ExtractToolLabel(System.Text.Json.JsonElement data)
-    {
-        if (data.TryGetProperty("args", out var args) && args.ValueKind == System.Text.Json.JsonValueKind.Object)
-        {
-            foreach (var key in new[] { "command", "path", "file_path", "query", "url", "pattern" })
-            {
-                if (args.TryGetProperty(key, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String)
-                {
-                    var s = v.GetString();
-                    if (!string.IsNullOrEmpty(s))
-                        return s.Length > 80 ? s[..77] + "…" : s;
-                }
-            }
-        }
-        return data.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
-    }
-
-    /// <summary>
-    /// Pulls a human-readable result snippet out of an agent tool result
-    /// payload. Tries (in order): <c>data.result.content</c> (per spec),
-    /// <c>data.result</c> as string, <c>data.output</c>, <c>data.content</c>,
-    /// <c>data.text</c>. Falls back to <paramref name="fallback"/>.
-    /// </summary>
-    private static string ExtractToolResultText(System.Text.Json.JsonElement data, string fallback)
-    {
-        if (data.TryGetProperty("result", out var result))
-        {
-            if (result.ValueKind == System.Text.Json.JsonValueKind.String)
-                return TruncateForToolOutput(result.GetString() ?? "");
-            if (result.ValueKind == System.Text.Json.JsonValueKind.Object &&
-                result.TryGetProperty("content", out var resultContent) &&
-                resultContent.ValueKind == System.Text.Json.JsonValueKind.String)
-                return TruncateForToolOutput(resultContent.GetString() ?? "");
-        }
-
-        foreach (var key in new[] { "output", "content", "text", "stdout" })
-        {
-            if (data.TryGetProperty(key, out var v) &&
-                v.ValueKind == System.Text.Json.JsonValueKind.String)
-            {
-                var s = v.GetString();
-                if (!string.IsNullOrEmpty(s)) return TruncateForToolOutput(s);
-            }
-        }
-        return fallback;
-    }
-
-    private static string ExtractToolErrorText(System.Text.Json.JsonElement data, string fallback)
-    {
-        foreach (var key in new[] { "error", "message", "stderr", "content" })
-        {
-            if (data.TryGetProperty(key, out var v))
-            {
-                if (v.ValueKind == System.Text.Json.JsonValueKind.String)
-                {
-                    var s = v.GetString();
-                    if (!string.IsNullOrEmpty(s)) return TruncateForToolOutput(s);
-                }
-                else if (v.ValueKind == System.Text.Json.JsonValueKind.Object &&
-                         v.TryGetProperty("message", out var inner) &&
-                         inner.ValueKind == System.Text.Json.JsonValueKind.String)
-                {
-                    var s = inner.GetString();
-                    if (!string.IsNullOrEmpty(s)) return TruncateForToolOutput(s);
-                }
-            }
-        }
-        return fallback;
-    }
-
-    private const int ToolOutputMaxChars = 4000;
-    private static string TruncateForToolOutput(string text)
-    {
-        if (text.Length <= ToolOutputMaxChars) return text;
-        return text[..ToolOutputMaxChars] + "\n…(truncated)";
     }
 
     /// <summary>
@@ -4685,24 +4941,6 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
     // ── chat.history flattened-tool-output recovery ──
 
     /// <summary>
-    /// True when an assistant- or user-role <c>chat.history</c> message
-    /// looks like a gateway control note that the web UI hides. We render
-    /// these as a dim Status entry instead of a full bubble so the
-    /// conversation flow doesn't get overwhelmed by transcript scaffolding.
-    /// </summary>
-    /// <remarks>
-    /// SECURITY (chat-rubber-duck round 2 MEDIUM 2): the previous
-    /// implementation matched on the bare ``System (untrusted):`` /
-    /// ``System:`` prefix. That allowed a user (or a prompt-injected
-    /// model) to craft a real user message that started with that prefix
-    /// and have it silently reclassified as a dim system note (visible
-    /// trust-taxonomy spoofing). We now require BOTH the prefix AND a
-    /// known structural marker that the gateway actually emits.
-    /// Plain user prose like ``System (untrusted): hello world`` no
-    /// longer triggers the hide-as-status path and renders as a regular
-    /// user/assistant bubble.
-    /// </remarks>
-    /// <summary>
     /// True when text is one of the approval slash-commands we send on the
     /// user's behalf (<c>/approve &lt;slug&gt; allow-once</c>,
     /// <c>/approve &lt;slug&gt; allow-always</c>, or
@@ -4725,41 +4963,6 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
 
     private static readonly System.Text.RegularExpressions.Regex s_approvalSlashCommandRegex =
         new(@"^/(?:approve\s+[A-Za-z0-9_-]{4,64}(?:\s+(?:allow-once|allow-always))?|deny\s+[A-Za-z0-9_-]{4,64})\s*$",
-            System.Text.RegularExpressions.RegexOptions.Compiled);
-
-    internal static bool LooksLikeSystemControlNote(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return false;
-        var t = text.TrimStart();
-        bool hasPrefix =
-            t.StartsWith("System (untrusted):", StringComparison.Ordinal) ||
-            t.StartsWith("System:", StringComparison.Ordinal);
-        if (!hasPrefix) return false;
-
-        // We do not control the gateway protocol, and these frames currently
-        // arrive as plain role=user text rather than structured provenance.
-        // Keep this intentionally narrow: prefix + gateway-emitted structural
-        // marker. If gateway wording changes, update this list and tests rather
-        // than loosening to generic "System:" substring matches that could
-        // misclassify ordinary user prose.
-        return t.Contains("Exec completed (", StringComparison.Ordinal)
-            || t.Contains("Process exited with code", StringComparison.Ordinal)
-            || t.Contains("Command still running (session", StringComparison.Ordinal)
-            || t.Contains("An async command you ran", StringComparison.Ordinal)
-            || t.Contains("Tool reported", StringComparison.Ordinal)
-            || t.Contains("exec result for ", StringComparison.Ordinal)
-            || t.Contains("tool_call_", StringComparison.Ordinal)
-            || t.Contains("Reset session", StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// Pre-compiled regex that matches a CLI option flag (e.g. <c>--help</c>,
-    /// <c>--idempotency-key</c>, <c>-h</c>). Used by
-    /// <see cref="LooksLikeFlattenedToolOutput"/> as a strong signal that an
-    /// assistant message is verbatim CLI <c>--help</c> output.
-    /// </summary>
-    private static readonly System.Text.RegularExpressions.Regex s_cliFlagRegex =
-        new(@"(?:^|\s)(?:--[a-z][\w-]*|-[a-zA-Z])(?=\s|=|$)",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
     // ── Content-block-seam repair ──────────────────────────────────────
@@ -4933,147 +5136,6 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
     }
 
 
-    /// <summary>
-    /// True when an assistant-role <c>chat.history</c> message is almost
-    /// certainly the verbatim output of an exec tool that the gateway
-    /// flattened into plain text on the way out (the spec confirms it
-    /// strips ``<tool_call>`` / ``<function_call>`` XML and tool blocks
-    /// before serving history).
-    ///
-    /// Detection strategy (any one match → flattened tool output):
-    /// <list type="bullet">
-    ///   <item>Verbatim exec terminator markers ("Process exited with code",
-    ///     "Command still running (session", "Exec completed (").</item>
-    ///   <item>Opens with a UNC / POSIX system path that's almost always a
-    ///     tool result (e.g. <c>\\wsl.localhost\</c>, <c>/usr/</c>).</item>
-    ///   <item>Opens with the OpenClaw CLI version banner
-    ///     (<c>"OpenClaw 2026.4.23 ..."</c>) — these are <c>--help</c>
-    ///     dumps captured by an exec tool.</item>
-    ///   <item>Contains both <c>Usage:</c> AND any of <c>Options:</c> /
-    ///     <c>Commands:</c> / <c>Examples:</c> / <c>Aliases:</c> —
-    ///     classic CLI help layout.</item>
-    ///   <item>Has ≥ 5 CLI flag tokens (matches <c>s_cliFlagRegex</c>) —
-    ///     dense flag listings only show up in <c>--help</c> output.</item>
-    /// </list>
-    /// </summary>
-    internal static bool LooksLikeFlattenedToolOutput(string text)
-    {
-        if (string.IsNullOrEmpty(text) || text.Length < 40) return false;
-
-        // ── Strong terminator markers (exec wrappers).
-        if (text.Contains("Process exited with code", StringComparison.Ordinal)) return true;
-        if (text.Contains("Command still running (session", StringComparison.Ordinal)) return true;
-        if (text.Contains("Exec completed (", StringComparison.Ordinal)) return true;
-
-        // ── System-path openings.
-        var head = text.AsSpan(0, Math.Min(80, text.Length));
-        if (head.StartsWith("\\\\wsl.localhost\\")) return true;
-        if (head.StartsWith("/usr/") || head.StartsWith("/home/") || head.StartsWith("/var/") ||
-            head.StartsWith("/etc/") || head.StartsWith("/tmp/")) return true;
-
-        // ── OpenClaw / common CLI tool version banner. Catches ``openclaw
-        // help``, ``openclaw nodes invoke --help``, etc.
-        var trimmed = text.AsSpan().TrimStart();
-        if (trimmed.StartsWith("OpenClaw 20") ||
-            trimmed.StartsWith("OpenClaw v") ||
-            trimmed.StartsWith("openclaw ")) return true;
-
-        // ── Usage: + (Options:|Commands:|Examples:|Aliases:) — generic CLI
-        // help layout regardless of which tool emitted it.
-        if (text.Contains("Usage:", StringComparison.Ordinal) &&
-            (text.Contains("Options:", StringComparison.Ordinal) ||
-             text.Contains("Commands:", StringComparison.Ordinal) ||
-             text.Contains("Examples:", StringComparison.Ordinal) ||
-             text.Contains("Aliases:", StringComparison.Ordinal)))
-            return true;
-
-        // ── Dense ``--flag`` presence (≥ 5 matches is well above false-
-        // positive rate for normal prose). Only run the regex when text is
-        // long enough to potentially carry that many tokens.
-        if (text.Length >= 200)
-        {
-            int flagCount = 0;
-            foreach (System.Text.RegularExpressions.Match _ in s_cliFlagRegex.Matches(text))
-            {
-                if (++flagCount >= 5) return true;
-            }
-        }
-
-        return false;
-    }
-
-    /// <summary>
-    /// Best-guess kind label for a flattened-tool-output assistant
-    /// message. Used to populate the tool chip's monospace kind suffix.
-    /// Detects tool types from common output patterns as a heuristic
-    /// fallback when cached metadata is unavailable.
-    /// </summary>
-    internal static string ClassifyFlattenedToolOutput(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return "exec";
-
-        // Shell/process markers
-        if (text.Contains("Command still running", StringComparison.Ordinal) ||
-            text.Contains("Process exited with code", StringComparison.Ordinal))
-            return "bash";
-
-        // File read patterns (numbered lines like "1. ", "42. ")
-        if (s_numberedLineRegex.IsMatch(text))
-            return "view";
-
-        // Grep / search result patterns ("path/file.ext:123:matched line")
-        if (s_grepResultRegex.IsMatch(text))
-            return "grep";
-
-        // Directory listing / glob patterns
-        if (text.Contains("Directory:", StringComparison.Ordinal) ||
-            text.Contains("Mode                ", StringComparison.Ordinal))
-            return "glob";
-
-        // Git output
-        if (text.StartsWith("commit ", StringComparison.Ordinal) ||
-            text.StartsWith("diff --git", StringComparison.Ordinal) ||
-            text.Contains("Author:", StringComparison.Ordinal) && text.Contains("Date:", StringComparison.Ordinal))
-            return "git";
-
-        // Edit/write patterns
-        if (text.Contains("successfully created", StringComparison.OrdinalIgnoreCase) ||
-            text.Contains("File written", StringComparison.OrdinalIgnoreCase) ||
-            text.Contains("Applied edit", StringComparison.OrdinalIgnoreCase))
-            return "edit";
-
-        // Exec completed marker
-        if (text.Contains("Exec completed (", StringComparison.Ordinal))
-            return "exec";
-
-        return "exec";
-    }
-
-    /// <summary>Matches numbered output lines typical of file view output (e.g. "  1. content").</summary>
-    private static readonly System.Text.RegularExpressions.Regex s_numberedLineRegex =
-        new(@"^\s*\d+\.\s", System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.Multiline);
-
-    /// <summary>Matches grep-style results (path:line:content).</summary>
-    private static readonly System.Text.RegularExpressions.Regex s_grepResultRegex =
-        new(@"^[^\s:]+\.\w+:\d+:", System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.Multiline);
-
-    /// <summary>
-    /// Extract a short one-line summary from flattened tool output text
-    /// for use as the tool chip label. Truncates to 80 chars.
-    /// </summary>
-    internal static string ExtractFlattenedToolSummary(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return "";
-        // Use the first non-empty line as the summary
-        var firstLine = text.AsSpan().TrimStart();
-        var lineEnd = firstLine.IndexOfAny('\r', '\n');
-        if (lineEnd > 0) firstLine = firstLine[..lineEnd];
-        var summary = firstLine.Length > 80
-            ? new string(firstLine[..77]) + "…"
-            : new string(firstLine);
-        return summary;
-    }
-
     // ── State helpers ──
 
     /// <summary>
@@ -5111,6 +5173,10 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         ChatToolStartEvent e => e with
         {
             Text = TruncateForChatEntry(e.Text),
+            ToolName = TruncateForChatEntry(e.ToolName)
+        },
+        ChatToolPresentationEvent e => e with
+        {
             ToolName = TruncateForChatEntry(e.ToolName)
         },
         ChatToolOutputEvent e => e with { Text = TruncateForChatEntry(e.Text) },
@@ -5215,6 +5281,9 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
 
     private long GetResetVersionLocked(string threadId) =>
         _resetVersions.TryGetValue(threadId, out var version) ? version : 0;
+
+    private long GetHistoryReplacementVersionLocked(string threadId) =>
+        _historyReplacementVersions.TryGetValue(threadId, out var version) ? version : 0;
 
     private long GetHistoryRevisionLocked(string threadId) =>
         _historyRevisions.TryGetValue(threadId, out var revision) ? revision : 0;
@@ -5410,7 +5479,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         requestRemoteBackfill = false;
         var isNormalUserText = roleLower == "user" &&
             !LooksLikeApprovalSlashCommand(rawText) &&
-            !LooksLikeSystemControlNote(rawText);
+            !NativeToolProjector.LooksLikeSystemControlNote(rawText);
 
         if (isNormalUserText &&
             !HasPendingLocalEchoTextLocked(threadId, rawText) &&
@@ -6165,7 +6234,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         var composeKey = _bridge.MainSessionKey;
         var composeAgentId = _sessions
             .FirstOrDefault(session => string.Equals(session.Key, composeKey, StringComparison.Ordinal)) is { } mainSession
-                ? SessionPresentationResolver.Resolve(mainSession).AgentId ?? "main"
+                ? SessionDisplayResolver.Resolve(mainSession).AgentId ?? "main"
                 : "main";
         var composeReady = _bridge.HasHandshakeSnapshot
             && !string.IsNullOrWhiteSpace(composeKey)
@@ -6319,15 +6388,15 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
 
     private static ChatThread ToThread(SessionInfo s, string title)
     {
-        var presentation = SessionPresentationResolver.Resolve(s);
+        var display = SessionDisplayResolver.Resolve(s);
         return new ChatThread
         {
             Id = s.Key ?? string.Empty,
             Title = title,
-            AgentId = presentation.AgentId,
-            IsBackground = presentation.IsBackground,
+            AgentId = display.AgentId,
+            IsBackground = display.IsBackground,
             Status = SessionVisibilityFilter.ToChatThreadStatus(s),
-            Activity = string.IsNullOrEmpty(s.CurrentActivity) ? ChatActivity.Idle : ChatActivity.Working,
+            Activity = SessionVisibilityFilter.ToChatThreadActivity(s),
             Workspace = s.Channel,
             Model = s.Model,
             ModelProvider = s.Provider,
@@ -6535,6 +6604,11 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         public long Ts { get; set; }
         public string ToolName { get; set; } = "";
         public string Label { get; set; } = "";
+        public string? ToolCallId { get; set; }
+        public string? RunId { get; set; }
+        public long LegacyTurn { get; set; }
+        public JsonObject? ToolArgs { get; set; }
+        public ChatToolIdentityStrength IdentityStrength { get; set; } = ChatToolIdentityStrength.Heuristic;
     }
 
     /// <summary>Attachment display metadata persisted without attachment bytes.</summary>
@@ -6878,7 +6952,12 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                     {
                         Ts = e.Ts,
                         ToolName = NormalizeCachedDisplayText(e.ToolName),
-                        Label = NormalizeCachedDisplayText(e.Label)
+                        Label = NormalizeCachedDisplayText(e.Label),
+                        ToolCallId = e.ToolCallId,
+                        RunId = e.RunId,
+                        LegacyTurn = e.LegacyTurn,
+                        ToolArgs = NormalizeCachedToolArgs(e.ToolArgs),
+                        IdentityStrength = e.IdentityStrength
                     }).ToList(),
                     StringComparer.Ordinal);
             }
@@ -6940,10 +7019,20 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
     /// Cache a tool call's metadata so it can be recovered when the gateway
     /// flattens it during history replay on a future app launch.
     /// </summary>
-    internal void CacheToolMeta(string threadId, long tsMs, string toolName, string label)
+    internal void CacheToolMeta(
+        string threadId,
+        long tsMs,
+        string toolName,
+        string label,
+        string? toolCallId = null,
+        JsonObject? toolArgs = null,
+        ChatToolIdentityStrength identityStrength = ChatToolIdentityStrength.Heuristic,
+        string? runId = null,
+        long legacyTurn = 0)
     {
         System.Threading.Timer? timerToDispose = null;
         long saveVersion;
+        runId = string.IsNullOrWhiteSpace(runId) ? null : runId;
         lock (_gate)
         {
             if (_disposed)
@@ -6959,15 +7048,48 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 _toolMetaCache[key] = list;
             }
 
-            // Deduplicate by timestamp (same tool event shouldn't be cached twice)
-            if (list.Count > 0 && list[^1].Ts == tsMs && list[^1].ToolName == toolName)
+            if (!string.IsNullOrWhiteSpace(toolCallId))
+            {
+                var existing = list.FindLast(entry =>
+                    string.Equals(entry.ToolCallId, toolCallId, StringComparison.Ordinal)
+                    && string.Equals(entry.RunId, runId, StringComparison.Ordinal)
+                    && (!string.IsNullOrWhiteSpace(runId) || entry.LegacyTurn == legacyTurn));
+                if (existing is not null)
+                {
+                    if (identityStrength > existing.IdentityStrength)
+                    {
+                        existing.ToolName = NormalizeCachedDisplayText(toolName);
+                        existing.IdentityStrength = identityStrength;
+                    }
+                    if (!string.IsNullOrWhiteSpace(label))
+                        existing.Label = NormalizeCachedDisplayText(label);
+                    existing.ToolArgs = MergeCachedToolArgs(existing.ToolArgs, toolArgs);
+                    _toolMetaCacheDirty = true;
+                    saveVersion = ++_toolMetaSaveVersion;
+                    timerToDispose = _toolMetaSaveTimer;
+                    _toolMetaSaveTimer = new System.Threading.Timer(
+                        _ => SaveToolMetaCache(saveVersion),
+                        null,
+                        500,
+                        Timeout.Infinite);
+                    goto ExitLock;
+                }
+            }
+            else if (list.Count > 0 && list[^1].Ts == tsMs && list[^1].ToolName == toolName)
+            {
                 return;
+            }
 
             list.Add(new CachedToolMeta
             {
                 Ts = tsMs,
                 ToolName = NormalizeCachedDisplayText(toolName),
-                Label = NormalizeCachedDisplayText(label)
+                Label = NormalizeCachedDisplayText(label),
+                ToolCallId = toolCallId,
+                RunId = string.IsNullOrWhiteSpace(runId) ? null : runId,
+                LegacyTurn = string.IsNullOrWhiteSpace(runId) ? legacyTurn : 0,
+                ToolArgs = NormalizeCachedToolArgs(toolArgs),
+                IdentityStrength = identityStrength
             });
 
             // Cap per-session entries
@@ -6980,6 +7102,8 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             saveVersion = ++_toolMetaSaveVersion;
             timerToDispose = _toolMetaSaveTimer;
             _toolMetaSaveTimer = new System.Threading.Timer(_ => SaveToolMetaCache(saveVersion), null, 500, Timeout.Infinite);
+        ExitLock:
+            ;
         }
         timerToDispose?.Dispose();
     }
@@ -7035,7 +7159,57 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         var match = cache.Dequeue();
         match.ToolName = NormalizeCachedDisplayText(match.ToolName);
         match.Label = NormalizeCachedDisplayText(match.Label);
+        match.ToolArgs = NormalizeCachedToolArgs(match.ToolArgs);
         return match;
+    }
+
+    private static JsonObject? NormalizeCachedToolArgs(JsonObject? args)
+    {
+        if (args is null)
+            return null;
+
+        var normalized = new JsonObject();
+        foreach (var key in NativeToolProjector.DisplayArgumentKeys)
+        {
+            if (args[key] is JsonValue value
+                && value.TryGetValue<string>(out var text))
+            {
+                var safe = NativeToolProjector.SanitizeToolDisplayValue(NormalizeCachedDisplayText(text));
+                if (!string.IsNullOrWhiteSpace(safe))
+                    normalized[key] = safe;
+            }
+        }
+        return normalized.Count == 0 ? null : normalized;
+    }
+
+    private static JsonObject? MergeCachedToolArgs(JsonObject? existing, JsonObject? incoming)
+    {
+        var merged = NormalizeCachedToolArgs(existing) ?? new JsonObject();
+        var normalizedIncoming = NormalizeCachedToolArgs(incoming);
+        if (normalizedIncoming is not null)
+        {
+            foreach (var key in NativeToolProjector.DisplayArgumentKeys)
+            {
+                if (normalizedIncoming[key] is not JsonValue value
+                    || !value.TryGetValue<string>(out var incomingText))
+                {
+                    continue;
+                }
+
+                if (merged[key] is JsonValue existingValue
+                    && existingValue.TryGetValue<string>(out var existingText)
+                    && !string.Equals(existingText, incomingText, StringComparison.Ordinal))
+                {
+                    var combined = existingText + "\n" + incomingText;
+                    merged[key] = combined.Length > 512 ? combined[..509] + "..." : combined;
+                }
+                else
+                {
+                    merged[key] = incomingText;
+                }
+            }
+        }
+        return merged.Count == 0 ? null : merged;
     }
 
     private static string NormalizeCachedDisplayText(string? value)

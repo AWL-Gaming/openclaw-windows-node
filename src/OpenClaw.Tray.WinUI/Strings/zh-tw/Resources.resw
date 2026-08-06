@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <root xmlns:ns1="urn:schemas-microsoft-com:xml-msdata" xmlns:xs="http://www.w3.org/2001/XMLSchema">
   <xs:schema id="root">
     <xs:element name="root" ns1:IsDataSet="true">
@@ -2842,13 +2842,16 @@
     <value>完成</value>
   </data>
   <data name="Chat_Compaction_Title" xml:space="preserve">
-    <value>內容已壓縮</value>
+    <value>已壓縮的歷程記錄</value>
   </data>
   <data name="Chat_Compaction_MetricsFormat" xml:space="preserve">
     <value>{0} → {1} 個權杖 · 節省 {2}</value>
   </data>
   <data name="Chat_Compaction_FallbackDetail" xml:space="preserve">
-    <value>較早的內容已摘要至檢查點。</value>
+    <value>壓縮後的對話記錄會保留為檢查點。開啟工作階段檢查點，以便從該壓縮檢視建立分支或還原。</value>
+  </data>
+  <data name="Chat_Compaction_OpenCheckpoints" xml:space="preserve">
+    <value>開啟檢查點</value>
   </data>
   <data name="Chat_PendingNewSessionTitle" xml:space="preserve">
     <value>新工作階段</value>
@@ -2883,6 +2886,27 @@
   <data name="Chat_Tool_FooterWithTimeFormat" xml:space="preserve">
     <value>工具 · {0}</value>
   </data>
+  <data name="Chat_Activity_CommandOne" xml:space="preserve"><value>執行了 {0} 個命令</value></data>
+  <data name="Chat_Activity_CommandMany" xml:space="preserve"><value>執行了 {0} 個命令</value></data>
+  <data name="Chat_Activity_ReadOne" xml:space="preserve"><value>讀取了 {0} 個檔案</value></data>
+  <data name="Chat_Activity_ReadMany" xml:space="preserve"><value>讀取了 {0} 個檔案</value></data>
+  <data name="Chat_Activity_EditOne" xml:space="preserve"><value>編輯了 {0} 個檔案</value></data>
+  <data name="Chat_Activity_EditMany" xml:space="preserve"><value>編輯了 {0} 個檔案</value></data>
+  <data name="Chat_Activity_WriteOne" xml:space="preserve"><value>寫入了 {0} 個檔案</value></data>
+  <data name="Chat_Activity_WriteMany" xml:space="preserve"><value>寫入了 {0} 個檔案</value></data>
+  <data name="Chat_Activity_SearchOne" xml:space="preserve"><value>執行了 {0} 次搜尋</value></data>
+  <data name="Chat_Activity_SearchMany" xml:space="preserve"><value>執行了 {0} 次搜尋</value></data>
+  <data name="Chat_Activity_FetchOne" xml:space="preserve"><value>擷取了 {0} 個頁面</value></data>
+  <data name="Chat_Activity_FetchMany" xml:space="preserve"><value>擷取了 {0} 個頁面</value></data>
+  <data name="Chat_Activity_GenericOne" xml:space="preserve"><value>使用了 {0} 個工具</value></data>
+  <data name="Chat_Activity_GenericMany" xml:space="preserve"><value>使用了 {0} 個工具</value></data>
+  <data name="Chat_Activity_GenericNamed" xml:space="preserve"><value>使用了 {1}</value></data>
+  <data name="Chat_Activity_GenericNamedRepeated" xml:space="preserve"><value>使用了 {1} {0} 次</value></data>
+  <data name="Chat_Activity_RunningFormat" xml:space="preserve"><value>正在執行 {0}</value></data>
+  <data name="Chat_Activity_Complete" xml:space="preserve"><value>已完成</value></data>
+  <data name="Chat_Activity_Expanded" xml:space="preserve"><value>已展開</value></data>
+  <data name="Chat_Activity_Collapsed" xml:space="preserve"><value>已摺疊</value></data>
+  <data name="Chat_Activity_AutomationFormat" xml:space="preserve"><value>活動：{0}。{1} 個工具。{2}。</value></data>
   <data name="Chat_Reasoning_ThinkingHeader" xml:space="preserve">
     <value>🧠 思考中</value>
   </data>
@@ -2939,6 +2963,9 @@
   </data>
   <data name="Chat_Composer_Tooltip_More" xml:space="preserve">
     <value>更多</value>
+  </data>
+  <data name="Chat_Composer_Tooltip_Settings" xml:space="preserve">
+    <value>設定</value>
   </data>
   <data name="Chat_Composer_Tooltip_Send" xml:space="preserve">
     <value>傳送</value>
@@ -4631,7 +4658,7 @@
     <value>全部</value>
   </data>
   <data name="SessionsPage_ShowCompleted.Header" xml:space="preserve">
-    <value>顯示已結束的工作階段</value>
+    <value>顯示已完成的工作階段</value>
   </data>
   <data name="SessionsPage_ShowBackground.Header" xml:space="preserve">
     <value>顯示背景工作階段</value>
@@ -4674,7 +4701,7 @@
     <value>正在載入工作階段…</value>
   </data>
   <data name="SessionsPage_NoActiveSessions.Text" xml:space="preserve">
-    <value>沒有作用中的工作階段</value>
+    <value>沒有工作階段</value>
   </data>
   <data name="SessionsPage_Reset.Text" xml:space="preserve">
     <value>重設</value>
@@ -6139,7 +6166,7 @@
     <value>Gateway authentication failed</value>
   </data>
   <data name="CommandCenter_BrowserProxyAuthMayNeed" xml:space="preserve">
-    <value>Browser proxy auth may need a gateway token</value>
+    <value>Browser control needs a gateway shared token</value>
   </data>
   <data name="CommandCenter_BrowserProxyHostNotDetected" xml:space="preserve">
     <value>Browser proxy host not detected</value>
@@ -6627,6 +6654,9 @@
   <data name="ConnectionPage_NodePillState_Pending" xml:space="preserve">
     <value>Enabled, not active yet</value>
   </data>
+  <data name="ConnectionPage_NodePillState_NeedsGatewayToken" xml:space="preserve">
+    <value>Needs gateway shared token</value>
+  </data>
   <data name="ConnectionPage_NodePillState_Off" xml:space="preserve">
     <value>Off</value>
   </data>
@@ -6869,5 +6899,17 @@
   </data>
   <data name="PermissionsPage_ExecPolicySaveFailed" xml:space="preserve">
     <value>儲存失敗</value>
+  </data>
+  <data name="SessionsPage_Status_Working" xml:space="preserve">
+    <value>處理中</value>
+  </data>
+  <data name="SessionsPage_Status_Ready" xml:space="preserve">
+    <value>就緒</value>
+  </data>
+  <data name="SessionsPage_Status_NeedsAttention" xml:space="preserve">
+    <value>需要注意</value>
+  </data>
+  <data name="SessionsPage_LastRunStopped" xml:space="preserve">
+    <value>上次執行已停止</value>
   </data>
 </root>

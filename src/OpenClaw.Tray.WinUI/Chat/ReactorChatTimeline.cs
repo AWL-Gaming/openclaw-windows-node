@@ -12,6 +12,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using OpenClaw.Chat;
 using OpenClawTray.Helpers;
+using System.Text.Json.Nodes;
 using Windows.UI;
 using static Microsoft.UI.Reactor.Factories;
 using WinUIAnnotatedScrollBar = Microsoft.UI.Xaml.Controls.AnnotatedScrollBar;
@@ -31,6 +32,7 @@ public sealed record ReactorChatTimelineProps(
     Action<string>? OnSuggestionPicked = null,
     bool SuggestionsDisabled = false,
     ReactorChatIdentity? AssistantIdentity = null,
+    Action<string>? OnOpenCheckpoints = null,
     long HistoryRevision = 0);
 
 public sealed record ReactorChatIdentity(
@@ -51,6 +53,7 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
         var (hoveredEntryId, setHoveredEntryId) = UseState<string?>(null, threadSafe: true);
         var speechOperation = UseRef(0);
         var mounted = UseRef(true);
+        var toolActivityExpansionState = UseRef<ChatToolActivityExpansionState>(new());
         var annotatedScrollBarRef = this.UseElementRef<WinUIAnnotatedScrollBar>();
 
         UseEffect((Func<Action>)(() =>
@@ -100,6 +103,7 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
         var rows = BuildRows(props);
         var initialTailRequestKey =
             $"{props.Timeline.SessionId ?? "none"}|{props.Timeline.TimelineGeneration}|{props.HistoryRevision}|{props.Timeline.ScrollToBottomToken}";
+        var displayedTailKey = rows.Count > 0 ? rows[^1].Key : null;
         void SetEntryHovered(string entryId, bool isHovered)
         {
             if (isHovered)
@@ -122,7 +126,8 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
                             speakingEntryId,
                             hoveredEntryId,
                             ToggleSpeechAsync,
-                            SetEntryHovered))
+                            SetEntryHovered,
+                            toolActivityExpansionState.Current))
                         .Background(Theme.Ref("SubtleFillColorTransparentBrush"))
                         .OnPointerEntered((_, _) => SetEntryHovered(row.Entry?.Id ?? row.Key, true))
                         .OnPointerExited((_, _) => SetEntryHovered(row.Entry?.Id ?? row.Key, false))
@@ -159,7 +164,9 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
                 .BindVerticalScrollController(
                     annotatedScrollBarRef,
                     rows.Count - 1,
-                    initialTailRequestKey)
+                    rows.Count,
+                    initialTailRequestKey,
+                    displayedTailKey)
                 .Grid(column: 0)
                 .AutomationName("Chat messages")
                 .HAlign(HorizontalAlignment.Stretch)
@@ -174,7 +181,12 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
     }
 
     public static string RowKey(OpenClawChatTimelineProps props, ChatTimelineItem entry) =>
-        $"thread:{props.SessionId ?? "none"}|generation:{props.TimelineGeneration}|kind:{entry.Kind}|id:{entry.Id}";
+        entry.Kind == ChatTimelineItemKind.ToolCall
+            ? ChatToolActivityPresentation.ActivityKey(
+                props.SessionId,
+                props.TimelineGeneration,
+                entry.Id)
+            : $"thread:{props.SessionId ?? "none"}|generation:{props.TimelineGeneration}|kind:{entry.Kind}|id:{entry.Id}";
 
     public static string SyntheticRowKey(OpenClawChatTimelineProps props, string id, ChatTimelineItemKind kind) =>
         $"thread:{props.SessionId ?? "none"}|generation:{props.TimelineGeneration}|kind:{kind}|synthetic:{id}";
@@ -191,22 +203,31 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
         if (props.Timeline.HasMoreHistory)
             rows.Add(ReactorTimelineRow.LoadEarlier(props));
 
-        var orderedEntries = OrderEntriesForPresentation(props.Timeline.Entries);
-        var assistantRunPositions = ChatTimelineAssistantRuns.Describe(orderedEntries);
+        var chronologicalEntries = props.Timeline.Entries;
+        var assistantRunPositions = ChatTimelineAssistantRuns.Describe(chronologicalEntries);
         var assistantRunsByEntryId = new Dictionary<string, ChatAssistantRunPosition>(
-            orderedEntries.Count,
+            chronologicalEntries.Count,
             StringComparer.Ordinal);
-        for (var index = 0; index < orderedEntries.Count; index++)
-            assistantRunsByEntryId[orderedEntries[index].Id] = assistantRunPositions[index];
-        var latestAssistantEntryId = orderedEntries
+        for (var index = 0; index < chronologicalEntries.Count; index++)
+            assistantRunsByEntryId[chronologicalEntries[index].Id] = assistantRunPositions[index];
+        var latestAssistantEntryId = chronologicalEntries
             .LastOrDefault(static entry => entry.Kind == ChatTimelineItemKind.Assistant)
             ?.Id;
 
-        foreach (var entry in orderedEntries)
+        var projectedRows = ChatToolActivityPresentation.Project(
+            chronologicalEntries,
+            props.Timeline.SessionId,
+            props.Timeline.TimelineGeneration,
+            props.Timeline.ShowToolCalls);
+        foreach (var projectedRow in projectedRows)
         {
-            if (entry.Kind == ChatTimelineItemKind.ToolCall && !props.Timeline.ShowToolCalls)
+            if (projectedRow.IsActivityGroup)
+            {
+                rows.Add(ReactorTimelineRow.FromActivity(props, projectedRow));
                 continue;
+            }
 
+            var entry = projectedRow.Entry!;
             rows.Add(ReactorTimelineRow.FromEntry(
                 props,
                 entry,
@@ -220,82 +241,23 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
         return rows;
     }
 
-    private static IReadOnlyList<ChatTimelineItem> OrderEntriesForPresentation(
-        IReadOnlyList<ChatTimelineItem> entries)
-    {
-        var ordered = new List<ChatTimelineItem>(entries.Count);
-        var turnStart = 0;
-
-        static bool IsDeniedPermission(ChatTimelineItem entry) =>
-            entry.Kind == ChatTimelineItemKind.PermissionRequest
-            && entry.PermissionDecision == ChatPermissionDecision.Denied;
-
-        void AppendTurn(int endExclusive)
-        {
-            var hasToolFailure = false;
-            for (var index = turnStart; index < endExclusive; index++)
-            {
-                if (entries[index].Kind == ChatTimelineItemKind.ToolCall
-                    && entries[index].ToolResult == ChatToolCallStatus.Error)
-                {
-                    hasToolFailure = true;
-                    break;
-                }
-            }
-
-            if (hasToolFailure)
-            {
-                for (var index = turnStart; index < endExclusive; index++)
-                    ordered.Add(entries[index]);
-                return;
-            }
-
-            for (var index = turnStart; index < endExclusive; index++)
-            {
-                if (entries[index].Kind != ChatTimelineItemKind.ToolCall
-                    && !IsDeniedPermission(entries[index]))
-                {
-                    ordered.Add(entries[index]);
-                }
-            }
-
-            for (var index = turnStart; index < endExclusive; index++)
-            {
-                if (entries[index].Kind == ChatTimelineItemKind.ToolCall)
-                    ordered.Add(entries[index]);
-            }
-
-            for (var index = turnStart; index < endExclusive; index++)
-            {
-                if (IsDeniedPermission(entries[index]))
-                    ordered.Add(entries[index]);
-            }
-        }
-
-        for (var index = 0; index < entries.Count; index++)
-        {
-            if (entries[index].Kind == ChatTimelineItemKind.User && index > turnStart)
-            {
-                AppendTurn(index);
-                turnStart = index;
-            }
-        }
-
-        AppendTurn(entries.Count);
-        return ordered;
-    }
-
     private static Element BuildRow(
         ReactorTimelineRow row,
         string? speakingEntryId,
         string? hoveredEntryId,
         Func<ChatTimelineItem, Task> toggleSpeechAsync,
-        Action<string, bool> setEntryHovered) => row.Kind switch
+        Action<string, bool> setEntryHovered,
+        ChatToolActivityExpansionState toolActivityExpansionState) => row.Kind switch
     {
         ReactorTimelineRowKind.Loading => BuildLoading(),
         ReactorTimelineRowKind.Empty => BuildEmpty(row),
         ReactorTimelineRowKind.LoadEarlier => BuildLoadEarlier(row),
         ReactorTimelineRowKind.Thinking => BuildThinking(row),
+        ReactorTimelineRowKind.Activity when row.Activity is { } activity =>
+            ToolCallCardRenderer.BuildActivity(
+                row.Props.Timeline,
+                activity,
+                toolActivityExpansionState),
         _ when row.Entry is { } entry => BuildEntry(
             row,
             entry,
@@ -409,11 +371,11 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
             string.Equals(hoveredEntryId, entry.Id, StringComparison.Ordinal),
             toggleSpeechAsync,
             setEntryHovered),
-        ChatTimelineItemKind.ToolCall => BuildTool(row, entry),
+        ChatTimelineItemKind.ToolCall => ToolCallCardRenderer.BuildStandalone(row.Props.Timeline, entry),
         ChatTimelineItemKind.Reasoning => BuildReasoning(entry),
         ChatTimelineItemKind.PermissionRequest => BuildPermission(row, entry),
-        ChatTimelineItemKind.Status => BuildStatus(entry),
-        _ => BuildStatus(entry),
+        ChatTimelineItemKind.Status => BuildStatus(row, entry),
+        _ => BuildGenericStatus(entry),
     };
 
     private static Element BuildUser(
@@ -758,57 +720,6 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
         }
     }
 
-    private static Element BuildTool(ReactorTimelineRow row, ChatTimelineItem entry)
-    {
-        var details = new List<Element>();
-        if (!string.IsNullOrWhiteSpace(entry.Text))
-            details.Add(Text(entry.Text, 12, FontWeights.Normal, "TextFillColorSecondaryBrush"));
-
-        if (!string.IsNullOrWhiteSpace(entry.ToolOutput))
-        {
-            var output = Text(
-                    entry.ToolOutput,
-                    12,
-                    FontWeights.Normal,
-                    "TextFillColorSecondaryBrush")
-                .Set(text =>
-                {
-                    text.FontFamily = new FontFamily("Cascadia Code, Consolas");
-                    text.IsTextSelectionEnabled = true;
-                });
-            details.Add(ScrollViewer(output)
-                .Set(scrollViewer =>
-                {
-                    scrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-                    scrollViewer.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
-                })
-                .MaxHeight(240));
-        }
-
-        var expander = Expander(
-                $"{entry.ToolName ?? "Tool"} · {entry.ToolResult}",
-                VStack(6, details.ToArray()))
-            .Set(control =>
-            {
-                control.HorizontalAlignment = HorizontalAlignment.Stretch;
-                control.HorizontalContentAlignment = HorizontalAlignment.Stretch;
-            })
-            .AutomationName($"Tool call {entry.ToolName ?? "tool"}")
-            .WithKey($"tool-expander:{entry.Id}:collapse:{row.Props.Timeline.ToolCallsCollapseVersion}");
-
-        return Border(expander)
-            .Margin(68, 4, 40, 4)
-            .Padding(12, 8)
-            .Background(BrushFor(
-                "CardBackgroundFillColorDefaultBrush",
-                Color.FromArgb(0x24, 0x80, 0x80, 0x80)))
-            .BorderBrush(BrushFor(
-                "ControlStrokeColorDefaultBrush",
-                Color.FromArgb(0x40, 0x80, 0x80, 0x80)))
-            .BorderThickness(1)
-            .CornerRadius(12);
-    }
-
     private static Element BuildReasoning(ChatTimelineItem entry)
     {
         var content = Text(
@@ -922,7 +833,23 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
             .BorderThickness(1));
     }
 
-    private static Element BuildStatus(ChatTimelineItem entry)
+    private static Element BuildStatus(ReactorTimelineRow row, ChatTimelineItem entry)
+    {
+        var presentation = ChatCompactionPresenter.TryCreateForEntry(
+            entry,
+            row.Props.Timeline.EntryMetadata,
+            LocalizedOrDefault("Chat_Compaction_Title", "COMPACTED HISTORY"),
+            LocalizedOrDefault(
+                "Chat_Compaction_FallbackDetail",
+                "The compacted transcript is preserved as a checkpoint. " +
+                "Open session checkpoints to branch or restore from that compacted view."),
+            LocalizedOrDefault("Chat_Compaction_OpenCheckpoints", "Open checkpoints"));
+        return presentation is null
+            ? BuildGenericStatus(entry)
+            : BuildCompaction(row, presentation);
+    }
+
+    private static Element BuildGenericStatus(ChatTimelineItem entry)
     {
         var isError = entry.Tone == ChatTone.Error;
         return Border(Text(
@@ -944,6 +871,41 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
                     isError ? (byte)0xC8 : (byte)0x80,
                     isError ? (byte)0x32 : (byte)0x80,
                     isError ? (byte)0x32 : (byte)0x80)));
+    }
+
+    private static Element BuildCompaction(
+        ReactorTimelineRow row,
+        ChatCompactionPresentation presentation)
+    {
+        var sessionKey = row.Props.Timeline.SessionId;
+        var canOpenCheckpoints = !string.IsNullOrWhiteSpace(sessionKey)
+            && row.Props.OnOpenCheckpoints is not null;
+        return Border(
+                VStack(
+                    8,
+                    Text(presentation.Title, 13, FontWeights.SemiBold)
+                        .HAlign(HorizontalAlignment.Center),
+                    Text(presentation.Detail, 12, FontWeights.Normal, "TextFillColorSecondaryBrush")
+                        .Set(text => text.TextAlignment = TextAlignment.Center)
+                        .HAlign(HorizontalAlignment.Center),
+                    Button(
+                            presentation.ActionLabel,
+                            () =>
+                            {
+                                if (canOpenCheckpoints)
+                                    row.Props.OnOpenCheckpoints!(sessionKey!);
+                            })
+                        .IsEnabled(canOpenCheckpoints)
+                        .HAlign(HorizontalAlignment.Center)
+                        .AutomationName(presentation.ActionLabel)))
+            .Margin(36, 8, 24, 8)
+            .Padding(16, 10)
+            .HAlign(HorizontalAlignment.Stretch)
+            .CornerRadius(8)
+            .Background(Theme.Ref("CardBackgroundFillColorDefaultBrush"))
+            .BorderBrush(Theme.Ref("ControlStrokeColorDefaultBrush"))
+            .BorderThickness(1)
+            .AutomationName(presentation.AutomationName);
     }
 
     private static Element Footer(
@@ -1072,6 +1034,7 @@ internal sealed record ReactorTimelineRow(
     ReactorTimelineRowKind Kind,
     ReactorChatTimelineProps Props,
     ChatTimelineItem? Entry,
+    ChatToolActivityRow? Activity = null,
     bool IsLatestAssistant = false,
     bool IsAssistantRunStart = false,
     bool IsAssistantRunEnd = false)
@@ -1086,9 +1049,20 @@ internal sealed record ReactorTimelineRow(
             ReactorTimelineRowKind.Entry,
             props,
             entry,
+            null,
             isLatestAssistant,
             assistantRunPosition.IsStart,
             assistantRunPosition.IsEnd);
+
+    public static ReactorTimelineRow FromActivity(
+        ReactorChatTimelineProps props,
+        ChatToolActivityRow activity) =>
+        new(
+            activity.Key,
+            ReactorTimelineRowKind.Activity,
+            props,
+            null,
+            activity);
 
     public static ReactorTimelineRow Thinking(ReactorChatTimelineProps props) =>
         new(
@@ -1121,6 +1095,7 @@ internal sealed record ReactorTimelineRow(
 internal enum ReactorTimelineRowKind
 {
     Entry,
+    Activity,
     Thinking,
     LoadEarlier,
     Loading,

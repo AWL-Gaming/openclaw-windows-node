@@ -5,6 +5,7 @@ using OpenClaw.Chat;
 using OpenClaw.Shared;
 using OpenClaw.Shared.Capabilities;
 using OpenClawTray.Chat;
+using OpenClawTray.Dialogs;
 using OpenClawTray.Helpers;
 using OpenClawTray.Services;
 using OpenClawTray.Windows;
@@ -15,6 +16,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Runtime.InteropServices.WindowsRuntime;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Windows.Storage.Streams;
@@ -297,6 +299,7 @@ public sealed partial class ChatPage : Page
             onVoiceRequest: VoiceTranscribeAsync,
             onAttachClick: OnAttachClicked,
             onSettingsClick: () => _hub?.NavigateTo("voice"),
+            onOpenCheckpoints: OpenSessionCheckpoints,
             onSpeakerMuteChanged: muted => _ = OnSpeakerMuteChangedAsync(muted),
             initialMuted: ShouldStartSpeakerMuted(CurrentApp.Settings));
         _mountedProvider = provider;
@@ -315,6 +318,15 @@ public sealed partial class ChatPage : Page
             });
         }
     }
+
+    private void OpenSessionCheckpoints(string sessionKey) =>
+        AsyncEventHandlerGuard.Run(
+            () => SessionCheckpointDialogCoordinator.ShowAsync(
+                XamlRoot,
+                sessionKey,
+                isHostAvailable: () => _pageActive && XamlRoot is not null),
+            new OpenClawTray.AppLogger(),
+            nameof(OpenSessionCheckpoints));
 
     private IChatDataProvider? ResolveChatProvider(App? app)
     {
@@ -393,20 +405,100 @@ public sealed partial class ChatPage : Page
 
         private static ChatDataSnapshot CreateSnapshot()
         {
-            static ChatTimelineState CreateTimeline(string id) => ChatTimelineState.Initial() with
+            static ChatTimelineState CreateTimeline(string id)
             {
-                Entries = ChatTimelineState.Initial().Entries
-                    .Add(new ChatTimelineItem(
-                        $"accessibility-user-{id}",
-                        ChatTimelineItemKind.User,
-                        "Verify the native chat surface."))
-                    .Add(new ChatTimelineItem(
-                        $"accessibility-assistant-{id}",
-                        ChatTimelineItemKind.Assistant,
-                        "The timeline and composer are ready.")),
-                NextId = 3,
-                HistoryLoaded = true,
-            };
+                var timeline = ChatTimelineState.Initial() with
+                {
+                    Entries = ChatTimelineState.Initial().Entries
+                        .Add(new ChatTimelineItem(
+                            $"accessibility-user-{id}",
+                            ChatTimelineItemKind.User,
+                            "Verify the native chat surface."))
+                        .Add(new ChatTimelineItem(
+                            $"accessibility-assistant-{id}",
+                            ChatTimelineItemKind.Assistant,
+                            "The timeline and composer are ready.")),
+                    NextId = 3,
+                    HistoryLoaded = true,
+                };
+
+                if (!string.Equals(id, DefaultThreadId, StringComparison.Ordinal))
+                    return timeline;
+
+                timeline = ChatTimelineReducer.Apply(
+                    timeline,
+                    new ChatToolStartEvent(
+                        "Tool",
+                        "Tool",
+                        ToolCallId: "proof-parent-bash",
+                        IdentityStrength: ChatToolIdentityStrength.Fallback,
+                        RunId: "proof-run-bash"));
+                timeline = ChatTimelineReducer.Apply(
+                    timeline,
+                    new ChatToolPresentationEvent(
+                        "proof-parent-bash",
+                        "Bash",
+                        ChatToolIdentityStrength.Specific,
+                        new JsonObject
+                        {
+                            ["command"] = "powershell -NoProfile -Command Get-ChildItem .\\src",
+                        },
+                        ChildToolCallId: "proof-child-bash",
+                        RunId: "proof-run-bash"));
+                timeline = ChatTimelineReducer.Apply(
+                    timeline,
+                    new ChatToolOutputEvent(
+                        "Synthetic output only.",
+                        "proof-child-bash",
+                        "proof-run-bash"));
+
+                timeline = ChatTimelineReducer.Apply(
+                    timeline,
+                    new ChatToolStartEvent(
+                        "Tool",
+                        "Tool",
+                        ToolCallId: "proof-parent-patch",
+                        IdentityStrength: ChatToolIdentityStrength.Fallback,
+                        RunId: "proof-run-patch"));
+                timeline = ChatTimelineReducer.Apply(
+                    timeline,
+                    new ChatToolPresentationEvent(
+                        "proof-parent-patch",
+                        "Apply Patch",
+                        ChatToolIdentityStrength.Specific,
+                        new JsonObject
+                        {
+                            ["file_path"] = "src\\OpenClaw.Chat\\ChatTimelineReducer.cs",
+                        },
+                        ChildToolCallId: "proof-child-patch",
+                        RunId: "proof-run-patch"));
+                timeline = ChatTimelineReducer.Apply(
+                    timeline,
+                    new ChatToolOutputEvent(
+                        string.Empty,
+                        "proof-parent-patch",
+                        "proof-run-patch"));
+
+                timeline = ChatTimelineReducer.Apply(
+                    timeline,
+                    new ChatToolStartEvent(
+                        "Untrusted command title omitted",
+                        "Tool",
+                        new JsonObject
+                        {
+                            ["command"] = "[redacted]",
+                        },
+                        ToolCallId: "proof-parent-untrusted",
+                        IdentityStrength: ChatToolIdentityStrength.Fallback,
+                        RunId: "proof-run-untrusted"));
+                timeline = ChatTimelineReducer.Apply(
+                    timeline,
+                    new ChatToolOutputEvent(
+                        string.Empty,
+                        "proof-parent-untrusted",
+                        "proof-run-untrusted"));
+                return ChatTimelineReducer.Apply(timeline, new ChatTurnEndEvent());
+            }
 
             return new ChatDataSnapshot(
                 [

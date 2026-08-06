@@ -2889,13 +2889,16 @@ Use one of these options:
     <value>Done</value>
   </data>
   <data name="Chat_Compaction_Title" xml:space="preserve">
-    <value>Context compacted</value>
+    <value>COMPACTED HISTORY</value>
   </data>
   <data name="Chat_Compaction_MetricsFormat" xml:space="preserve">
     <value>{0} → {1} tokens · {2} saved</value>
   </data>
   <data name="Chat_Compaction_FallbackDetail" xml:space="preserve">
-    <value>Earlier context was summarized into a checkpoint.</value>
+    <value>The compacted transcript is preserved as a checkpoint. Open session checkpoints to branch or restore from that compacted view.</value>
+  </data>
+  <data name="Chat_Compaction_OpenCheckpoints" xml:space="preserve">
+    <value>Open checkpoints</value>
   </data>
   <data name="Chat_PendingNewSessionTitle" xml:space="preserve">
     <value>New session</value>
@@ -2930,6 +2933,27 @@ Use one of these options:
   <data name="Chat_Tool_FooterWithTimeFormat" xml:space="preserve">
     <value>Tool · {0}</value>
   </data>
+  <data name="Chat_Activity_CommandOne" xml:space="preserve"><value>Ran {0} command</value></data>
+  <data name="Chat_Activity_CommandMany" xml:space="preserve"><value>Ran {0} commands</value></data>
+  <data name="Chat_Activity_ReadOne" xml:space="preserve"><value>read {0} file</value></data>
+  <data name="Chat_Activity_ReadMany" xml:space="preserve"><value>read {0} files</value></data>
+  <data name="Chat_Activity_EditOne" xml:space="preserve"><value>edited {0} file</value></data>
+  <data name="Chat_Activity_EditMany" xml:space="preserve"><value>edited {0} files</value></data>
+  <data name="Chat_Activity_WriteOne" xml:space="preserve"><value>wrote {0} file</value></data>
+  <data name="Chat_Activity_WriteMany" xml:space="preserve"><value>wrote {0} files</value></data>
+  <data name="Chat_Activity_SearchOne" xml:space="preserve"><value>ran {0} search</value></data>
+  <data name="Chat_Activity_SearchMany" xml:space="preserve"><value>ran {0} searches</value></data>
+  <data name="Chat_Activity_FetchOne" xml:space="preserve"><value>fetched {0} page</value></data>
+  <data name="Chat_Activity_FetchMany" xml:space="preserve"><value>fetched {0} pages</value></data>
+  <data name="Chat_Activity_GenericOne" xml:space="preserve"><value>used {0} tool</value></data>
+  <data name="Chat_Activity_GenericMany" xml:space="preserve"><value>used {0} tools</value></data>
+  <data name="Chat_Activity_GenericNamed" xml:space="preserve"><value>used {1}</value></data>
+  <data name="Chat_Activity_GenericNamedRepeated" xml:space="preserve"><value>used {1} {0} times</value></data>
+  <data name="Chat_Activity_RunningFormat" xml:space="preserve"><value>Running {0}</value></data>
+  <data name="Chat_Activity_Complete" xml:space="preserve"><value>Complete</value></data>
+  <data name="Chat_Activity_Expanded" xml:space="preserve"><value>Expanded</value></data>
+  <data name="Chat_Activity_Collapsed" xml:space="preserve"><value>Collapsed</value></data>
+  <data name="Chat_Activity_AutomationFormat" xml:space="preserve"><value>Activity: {0}. {1} tools. {2}.</value></data>
   <data name="Chat_Reasoning_ThinkingHeader" xml:space="preserve">
     <value>🧠 Thinking</value>
   </data>
@@ -2986,6 +3010,9 @@ Use one of these options:
   </data>
   <data name="Chat_Composer_Tooltip_More" xml:space="preserve">
     <value>More</value>
+  </data>
+  <data name="Chat_Composer_Tooltip_Settings" xml:space="preserve">
+    <value>Settings</value>
   </data>
   <data name="Chat_Composer_Tooltip_Send" xml:space="preserve">
     <value>Send</value>
@@ -4678,7 +4705,7 @@ Commands are blocked while sandboxing is unavailable because strict fallback blo
     <value>All</value>
   </data>
   <data name="SessionsPage_ShowCompleted.Header" xml:space="preserve">
-    <value>Show ended</value>
+    <value>Show completed</value>
   </data>
   <data name="SessionsPage_ShowBackground.Header" xml:space="preserve">
     <value>Show background</value>
@@ -4721,7 +4748,7 @@ Commands are blocked while sandboxing is unavailable because strict fallback blo
     <value>Loading sessions...</value>
   </data>
   <data name="SessionsPage_NoActiveSessions.Text" xml:space="preserve">
-    <value>No active sessions</value>
+    <value>No sessions</value>
   </data>
   <data name="SessionsPage_Reset.Text" xml:space="preserve">
     <value>Reset</value>
@@ -6143,7 +6170,7 @@ Make sure the gateway is running.</value>
     <value>Gateway authentication failed</value>
   </data>
   <data name="CommandCenter_BrowserProxyAuthMayNeed" xml:space="preserve">
-    <value>Browser proxy auth may need a gateway token</value>
+    <value>Browser control needs a gateway shared token</value>
   </data>
   <data name="CommandCenter_BrowserProxyHostNotDetected" xml:space="preserve">
     <value>Browser proxy host not detected</value>
@@ -6625,6 +6652,9 @@ Make sure the gateway is running.</value>
   <data name="ConnectionPage_NodePillState_Pending" xml:space="preserve">
     <value>Enabled, not active yet</value>
   </data>
+  <data name="ConnectionPage_NodePillState_NeedsGatewayToken" xml:space="preserve">
+    <value>Needs gateway shared token</value>
+  </data>
   <data name="ConnectionPage_NodePillState_Off" xml:space="preserve">
     <value>Off</value>
   </data>
@@ -6909,5 +6939,17 @@ Make sure the gateway is running.</value>
   </data>
   <data name="PermissionsPage_ExecPolicySaveFailed" xml:space="preserve">
     <value>Save failed</value>
+  </data>
+  <data name="SessionsPage_Status_Working" xml:space="preserve">
+    <value>Working</value>
+  </data>
+  <data name="SessionsPage_Status_Ready" xml:space="preserve">
+    <value>Ready</value>
+  </data>
+  <data name="SessionsPage_Status_NeedsAttention" xml:space="preserve">
+    <value>Needs attention</value>
+  </data>
+  <data name="SessionsPage_LastRunStopped" xml:space="preserve">
+    <value>Last run stopped</value>
   </data>
 </root>

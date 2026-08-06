@@ -156,14 +156,28 @@ Windows compare-and-swap and monotonicity checks are in
 
 ## What happens when a user says "delete this"?
 
-There is no universal "delete subsystem." The model interprets the request and
-selects a tool. The selected tool and host determine the path.
+There is no universal "delete subsystem." The gateway agent first resolves what
+"this" refers to and which authority owns it. It then chooses a typed operation
+or an exec host, passes that path's policy gates, executes exactly one selected
+operation, and returns the result to the agent.
 
 ![OpenClaw request and tool routing](diagrams/openclaw-request-and-tool-routing.svg)
 
 [Edit the request-routing diagram](diagrams/openclaw-request-and-tool-routing.excalidraw).
 
-Common branches include:
+The flow has four stages:
+
+1. **Resolve the target.** Is "this" gateway state, an agent workspace file, an
+   operating-system resource, or a purpose-built node capability?
+2. **Choose the authoritative operation.** Prefer a typed gateway or node
+   operation. Use shell exec only when the target requires shell semantics.
+3. **Authorize and execute on one host.** Gateway state stays in the gateway.
+   Workspace files stay under workspace/sandbox policy. Shell exec resolves to
+   sandbox, gateway, or an explicitly selected node.
+4. **Converge on one result.** The chosen operation returns success, denial, or
+   failure to the agent, which reports the outcome to the user.
+
+The concrete branches are:
 
 1. **A gateway API operation.** Deleting a session can become a typed gateway
    RPC such as `sessions.delete`. No node or shell is required.

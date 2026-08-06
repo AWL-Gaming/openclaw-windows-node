@@ -605,11 +605,18 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
             if (m.TryGetProperty("stopReason", out var sr))
                 stopReason = sr.GetString();
 
-            // content can be a plain string OR an array of {type:"text", text:"..."} blocks
+            // Content can include text and structured tool call/result blocks.
             string text = ExtractMessageText(m);
-            if (string.IsNullOrEmpty(text)) continue;
+            var toolContent = ExtractToolContent(m, role, text);
+            var contentParts = ExtractOrderedMessageContent(m, role, toolContent);
+            if (string.IsNullOrEmpty(text) && toolContent.Count == 0) continue;
             if (string.IsNullOrEmpty(role)) continue;
-            if (ChatMessageInfo.IsSilentAssistantDirective(role, text)) continue;
+            if (!string.IsNullOrEmpty(text)
+                && toolContent.Count == 0
+                && ChatMessageInfo.IsSilentAssistantDirective(role, text))
+            {
+                continue;
+            }
 
             var (inputTokens, outputTokens, responseTokens, contextPercent) = ExtractChatUsage(m);
             list.Add(new ChatMessageInfo
@@ -617,6 +624,8 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
                 SessionKey = sessionKey,
                 Role = role,
                 Text = text,
+                ToolContent = toolContent,
+                ContentParts = contentParts,
                 State = "final",
                 Ts = ts,
                 OpenClawId = openClawMetadata.Id,
@@ -663,6 +672,275 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
         }
 
         return string.Empty;
+    }
+
+    private static IReadOnlyList<ChatToolContentInfo> ExtractToolContent(
+        JsonElement message,
+        string role,
+        string messageText)
+    {
+        var blocks = new List<ChatToolContentInfo>();
+        var hasArrayContent = message.TryGetProperty("content", out var content)
+            && content.ValueKind == JsonValueKind.Array;
+        if (hasArrayContent)
+        {
+            foreach (var item in content.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object
+                    || !item.TryGetProperty("type", out var typeElement)
+                    || typeElement.ValueKind != JsonValueKind.String)
+                {
+                    continue;
+                }
+
+                var normalizedType = (typeElement.GetString() ?? string.Empty)
+                    .Replace("_", string.Empty, StringComparison.Ordinal)
+                    .ToLowerInvariant();
+                var kind = normalizedType switch
+                {
+                    "toolcall" or "tooluse" => ChatToolContentKind.Call,
+                    "toolresult" => ChatToolContentKind.Result,
+                    _ => (ChatToolContentKind?)null,
+                };
+                if (kind is null)
+                    continue;
+
+                var itemSemanticCallId = ReadFirstString(
+                    item,
+                    "tool_call_id",
+                    "toolCallId",
+                    "tool_use_id",
+                    "toolUseId");
+                var messageSemanticCallId = ReadFirstString(
+                    message,
+                    "tool_call_id",
+                    "toolCallId",
+                    "tool_use_id",
+                    "toolUseId");
+                var callId = kind == ChatToolContentKind.Call
+                    ? ReadFirstString(
+                        item,
+                        "id",
+                        "tool_call_id",
+                        "toolCallId",
+                        "tool_use_id",
+                        "toolUseId")
+                        ?? messageSemanticCallId
+                    : itemSemanticCallId
+                        ?? messageSemanticCallId
+                        ?? ReadFirstString(item, "id");
+                blocks.Add(new ChatToolContentInfo
+                {
+                    Kind = kind.Value,
+                    CallId = callId,
+                    ToolName = ReadFirstString(item, "name")
+                        ?? ReadFirstString(message, "toolName", "tool_name")
+                        ?? "tool",
+                    Args = kind == ChatToolContentKind.Call
+                        ? ReadFirstValue(item, "args", "arguments", "input")
+                        : null,
+                    Text = kind == ChatToolContentKind.Result
+                        ? ExtractToolContentText(item)
+                        : null,
+                    IsError = ReadBoolean(item, "isError", "is_error"),
+                });
+            }
+        }
+
+        var normalizedRole = role.Replace("_", string.Empty, StringComparison.Ordinal)
+            .ToLowerInvariant();
+        var supportsResultFallback = normalizedRole == "toolresult"
+            || (hasArrayContent && normalizedRole is "tool" or "function");
+        if (blocks.All(static block => block.Kind != ChatToolContentKind.Result)
+            && supportsResultFallback
+            && !string.IsNullOrEmpty(messageText))
+        {
+            blocks.Add(new ChatToolContentInfo
+            {
+                Kind = ChatToolContentKind.Result,
+                CallId = ReadFirstString(
+                    message,
+                    "tool_call_id",
+                    "toolCallId",
+                    "tool_use_id",
+                    "toolUseId"),
+                ToolName = ReadFirstString(message, "toolName", "tool_name", "name") ?? "tool",
+                Text = messageText,
+                IsError = ReadBoolean(message, "isError", "is_error"),
+            });
+        }
+
+        return blocks;
+    }
+
+    private static IReadOnlyList<ChatMessageContentPartInfo> ExtractOrderedMessageContent(
+        JsonElement message,
+        string role,
+        IReadOnlyList<ChatToolContentInfo> toolContent)
+    {
+        if (!message.TryGetProperty("content", out var content)
+            || content.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<ChatMessageContentPartInfo>();
+        }
+
+        var parts = new List<ChatMessageContentPartInfo>();
+        var text = new StringBuilder();
+        var toolIndex = 0;
+        var structuredToolCount = 0;
+
+        void FlushText()
+        {
+            if (text.Length == 0)
+                return;
+
+            parts.Add(new ChatMessageContentPartInfo
+            {
+                Kind = ChatMessageContentPartKind.Text,
+                Text = text.ToString(),
+            });
+            text.Clear();
+        }
+
+        foreach (var item in content.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.String)
+            {
+                text.Append(item.GetString());
+                continue;
+            }
+
+            if (item.ValueKind != JsonValueKind.Object
+                || !item.TryGetProperty("type", out var typeElement)
+                || typeElement.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            var normalizedType = (typeElement.GetString() ?? string.Empty)
+                .Replace("_", string.Empty, StringComparison.Ordinal)
+                .ToLowerInvariant();
+            if (normalizedType == "text")
+            {
+                if (item.TryGetProperty("text", out var textElement)
+                    && textElement.ValueKind == JsonValueKind.String)
+                {
+                    if (text.Length > 0)
+                        text.Append('\n');
+                    text.Append(textElement.GetString());
+                }
+                continue;
+            }
+
+            if (normalizedType is not ("toolcall" or "tooluse" or "toolresult"))
+                continue;
+
+            FlushText();
+            structuredToolCount++;
+            if (toolIndex < toolContent.Count)
+            {
+                parts.Add(new ChatMessageContentPartInfo
+                {
+                    Kind = ChatMessageContentPartKind.Tool,
+                    Tool = toolContent[toolIndex++],
+                });
+            }
+        }
+
+        FlushText();
+
+        var normalizedRole = role.Replace("_", string.Empty, StringComparison.Ordinal)
+            .ToLowerInvariant();
+        if (structuredToolCount == 0
+            && normalizedRole is "toolresult" or "tool" or "function"
+            && toolContent.Count > 0)
+        {
+            return toolContent
+                .Select(static tool => new ChatMessageContentPartInfo
+                {
+                    Kind = ChatMessageContentPartKind.Tool,
+                    Tool = tool,
+                })
+                .ToArray();
+        }
+
+        while (toolIndex < toolContent.Count)
+        {
+            parts.Add(new ChatMessageContentPartInfo
+            {
+                Kind = ChatMessageContentPartKind.Tool,
+                Tool = toolContent[toolIndex++],
+            });
+        }
+
+        return parts;
+    }
+
+    private static JsonElement? ReadFirstValue(JsonElement value, params string[] propertyNames)
+    {
+        foreach (var propertyName in propertyNames)
+        {
+            if (value.TryGetProperty(propertyName, out var property))
+                return property.Clone();
+        }
+
+        return null;
+    }
+
+    private static string? ReadFirstString(JsonElement value, params string[] propertyNames)
+    {
+        foreach (var propertyName in propertyNames)
+        {
+            if (value.TryGetProperty(propertyName, out var property)
+                && property.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(property.GetString()))
+            {
+                return property.GetString();
+            }
+        }
+
+        return null;
+    }
+
+    private static bool ReadBoolean(JsonElement value, params string[] propertyNames)
+    {
+        foreach (var propertyName in propertyNames)
+        {
+            if (value.TryGetProperty(propertyName, out var property)
+                && property.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                return property.GetBoolean();
+            }
+        }
+
+        return false;
+    }
+
+    private static string? ExtractToolContentText(JsonElement item)
+    {
+        if (item.TryGetProperty("text", out var text)
+            && text.ValueKind == JsonValueKind.String)
+        {
+            return text.GetString();
+        }
+
+        if (!item.TryGetProperty("content", out var content))
+            return null;
+        if (content.ValueKind == JsonValueKind.String)
+            return content.GetString();
+        if (content.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var parts = content.EnumerateArray()
+            .Where(static part => part.ValueKind == JsonValueKind.Object)
+            .Select(static part =>
+                part.TryGetProperty("text", out var partText)
+                && partText.ValueKind == JsonValueKind.String
+                    ? partText.GetString()
+                    : null)
+            .Where(static part => !string.IsNullOrEmpty(part))
+            .ToArray();
+        return parts.Length > 0 ? string.Join('\n', parts) : null;
     }
 
     /// <summary>
@@ -3793,16 +4071,6 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
         }
 
         if (item.ValueKind == JsonValueKind.Object
-            && item.TryGetProperty("presentation", out var presentation)
-            && presentation.ValueKind == JsonValueKind.Object
-            && TryGetRequiredBoolean(presentation, "isMain", out var presentationIsMain))
-        {
-            session.IsMain = presentationIsMain;
-            session.IsMainResolved = true;
-            return;
-        }
-
-        if (item.ValueKind == JsonValueKind.Object
             && item.TryGetProperty("isMain", out var isMain)
             && isMain.ValueKind is JsonValueKind.True or JsonValueKind.False)
         {
@@ -3823,7 +4091,15 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
     private void PopulateSessionFromObject(SessionInfo session, JsonElement item)
     {
         if (item.TryGetProperty("status", out var status))
-            session.Status = status.GetString() ?? "active";
+            session.Status = status.ValueKind == JsonValueKind.String
+                ? status.GetString() ?? "unknown"
+                : "unknown";
+        if (item.TryGetProperty("hasActiveRun", out var hasActiveRun))
+        {
+            session.HasActiveRun = hasActiveRun.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? hasActiveRun.GetBoolean()
+                : null;
+        }
         if (item.TryGetProperty("model", out var model))
         {
             var newModel = model.GetString();
@@ -3846,6 +4122,13 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
             session.Room = GetString(item, "room");
         if (item.TryGetProperty("space", out _)) session.Space = GetString(item, "space");
         if (item.TryGetProperty("chatType", out _)) session.ChatType = GetString(item, "chatType");
+        if (item.TryGetProperty("classification", out _)) session.Classification = GetString(item, "classification");
+        if (item.TryGetProperty("agentId", out _)) session.AgentId = GetString(item, "agentId");
+        if (item.TryGetProperty("accountId", out _)) session.AccountId = GetString(item, "accountId");
+        if (item.TryGetProperty("peerKind", out _)) session.PeerKind = GetString(item, "peerKind");
+        if (item.TryGetProperty("isBackground", out var isBackground)
+            && isBackground.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            session.IsBackground = isBackground.GetBoolean();
         if (item.TryGetProperty("execNode", out _)) session.ExecNode = GetString(item, "execNode");
         if (item.TryGetProperty("parentSessionKey", out _))
             session.ParentSessionKey = GetString(item, "parentSessionKey");
@@ -3859,12 +4142,6 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
                 ? GetString(origin, "label")
                 : null;
         if (item.TryGetProperty("worktree", out _)) session.Worktree = ParseSessionWorktree(item);
-        if (item.TryGetProperty("presentation", out _))
-            session.Presentation = ParseSessionPresentation(item);
-        if (session.Presentation is { } presentation)
-        {
-            session.Channel ??= presentation.Channel;
-        }
         if (item.TryGetProperty("sessionId", out var sessionId))
             session.SessionId = sessionId.GetString();
         if (item.TryGetProperty("thinkingLevel", out var thinking))
@@ -3914,43 +4191,6 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
         return id is null && branch is null && repoRoot is null
             ? null
             : new SessionWorktreeInfo { Id = id, Branch = branch, RepoRoot = repoRoot };
-    }
-
-    private static SessionPresentationInfo? ParseSessionPresentation(JsonElement item)
-    {
-        if (!item.TryGetProperty("presentation", out var presentation)
-            || presentation.ValueKind != JsonValueKind.Object)
-            return null;
-
-        var title = GetString(presentation, "title");
-        var family = GetString(presentation, "family");
-        if (title is null
-            || family is null
-            || !TryGetRequiredBoolean(presentation, "isMain", out var isMain)
-            || !TryGetRequiredBoolean(presentation, "isBackground", out var isBackground))
-            return null;
-
-        return new SessionPresentationInfo
-        {
-            Title = title,
-            TitleSource = GetString(presentation, "titleSource") ?? "generated",
-            Subtitle = GetString(presentation, "subtitle"),
-            Family = family,
-            AgentId = GetString(presentation, "agentId"),
-            Channel = GetString(presentation, "channel"),
-            AccountId = GetString(presentation, "accountId"),
-            PeerKind = GetString(presentation, "peerKind"),
-            IsMain = isMain,
-            IsBackground = isBackground,
-        };
-    }
-
-    private static bool TryGetRequiredBoolean(JsonElement parent, string propertyName, out bool value)
-    {
-        value = false;
-        if (!parent.TryGetProperty(propertyName, out var property)) return false;
-        if (property.ValueKind == JsonValueKind.True) value = true;
-        return property.ValueKind is JsonValueKind.True or JsonValueKind.False;
     }
 
     private void ParseNodeList(JsonElement nodesPayload)
