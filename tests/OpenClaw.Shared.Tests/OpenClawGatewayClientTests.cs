@@ -2160,6 +2160,44 @@ public class OpenClawGatewayClientTests
     }
 
     [Fact]
+    public void ParseSessions_PreservesGatewayRunLivenessAndDoesNotInventActiveStatus()
+    {
+        var helper = new GatewayClientTestHelper();
+
+        helper.ParseSessionsPayload("""
+        [
+          { "key": "agent:main:working", "status": "running", "hasActiveRun": true },
+          { "key": "agent:main:idle", "status": "running", "hasActiveRun": false },
+          { "key": "agent:main:unknown" }
+        ]
+        """);
+
+        var sessions = helper.GetSessionList().ToDictionary(session => session.Key);
+        Assert.True(sessions["agent:main:working"].HasActiveRun == true);
+        Assert.True(sessions["agent:main:idle"].HasActiveRun == false);
+        Assert.Null(sessions["agent:main:unknown"].HasActiveRun);
+        Assert.Equal("unknown", sessions["agent:main:unknown"].Status);
+    }
+
+    [Fact]
+    public void ParseSessions_RetainsRunStateWhenSparseUpdateOmitsIt()
+    {
+        var helper = new GatewayClientTestHelper();
+
+        helper.ParseSessionsPayload("""
+        [{ "key": "agent:main:stateful", "status": "failed", "hasActiveRun": false }]
+        """);
+        helper.ParseSessionsPayload("""
+        [{ "key": "agent:main:stateful", "displayName": "Current task" }]
+        """);
+
+        var session = Assert.Single(helper.GetSessionList());
+        Assert.Equal("failed", session.Status);
+        Assert.Equal(false, session.HasActiveRun);
+        Assert.Equal("Current task", session.DisplayName);
+    }
+
+    [Fact]
     public void ParseUsageStatusPayload_PopulatesProviderSummary()
     {
         var helper = new GatewayClientTestHelper();
