@@ -12,6 +12,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using OpenClaw.Chat;
 using OpenClawTray.Helpers;
+using System.Text.Json.Nodes;
 using Windows.UI;
 using static Microsoft.UI.Reactor.Factories;
 using WinUIAnnotatedScrollBar = Microsoft.UI.Xaml.Controls.AnnotatedScrollBar;
@@ -765,8 +766,33 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
     private static Element BuildTool(ReactorTimelineRow row, ChatTimelineItem entry)
     {
         var details = new List<Element>();
-        if (!string.IsNullOrWhiteSpace(entry.Text))
+        if (!string.IsNullOrWhiteSpace(entry.Text)
+            && !string.Equals(entry.Text.Trim(), "tool", StringComparison.OrdinalIgnoreCase))
+        {
             details.Add(Text(entry.Text, 12, FontWeights.Normal, "TextFillColorSecondaryBrush"));
+        }
+
+        var displayArgs = FormatToolDisplayArgs(entry.ToolArgs);
+        if (!string.IsNullOrWhiteSpace(displayArgs))
+        {
+            details.Add(VStack(
+                4,
+                Text(
+                    LocalizedOrDefault("Chat_Tool_InputSection", "Tool input"),
+                    12,
+                    FontWeights.SemiBold,
+                    "TextFillColorSecondaryBrush"),
+                Text(
+                        displayArgs,
+                        12,
+                        FontWeights.Normal,
+                        "TextFillColorSecondaryBrush")
+                    .Set(text =>
+                    {
+                        text.FontFamily = new FontFamily("Cascadia Code, Consolas");
+                        text.IsTextSelectionEnabled = true;
+                    })));
+        }
 
         if (!string.IsNullOrWhiteSpace(entry.ToolOutput))
         {
@@ -789,15 +815,26 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
                 .MaxHeight(240));
         }
 
+        var toolName = string.IsNullOrWhiteSpace(entry.ToolName)
+            ? LocalizedOrDefault("Chat_Tool_FooterLabel", "Tool")
+            : entry.ToolName;
+        var status = entry.ToolResult switch
+        {
+            ChatToolCallStatus.Success => LocalizedOrDefault("Chat_Status_Done", "Done"),
+            ChatToolCallStatus.Error => LocalizedOrDefault("Chat_Status_Error", "Error"),
+            ChatToolCallStatus.Interrupted => LocalizedOrDefault("Chat_Status_Interrupted", "Interrupted"),
+            _ => LocalizedOrDefault("Chat_Status_Running", "Running")
+        };
+        var toolCallLabel = LocalizedOrDefault("Chat_Tool_CallLabel", "Tool call");
         var expander = Expander(
-                $"{entry.ToolName ?? "Tool"} · {entry.ToolResult}",
+                $"{toolName} · {status}",
                 VStack(6, details.ToArray()))
             .Set(control =>
             {
                 control.HorizontalAlignment = HorizontalAlignment.Stretch;
                 control.HorizontalContentAlignment = HorizontalAlignment.Stretch;
             })
-            .AutomationName($"Tool call {entry.ToolName ?? "tool"}")
+            .AutomationName($"{toolCallLabel}: {toolName}, {status}")
             .WithKey($"tool-expander:{entry.Id}:collapse:{row.Props.Timeline.ToolCallsCollapseVersion}");
 
         return Border(expander)
@@ -811,6 +848,24 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
                 Color.FromArgb(0x40, 0x80, 0x80, 0x80)))
             .BorderThickness(1)
             .CornerRadius(12);
+    }
+
+    private static string FormatToolDisplayArgs(JsonObject? args)
+    {
+        if (args is null)
+            return string.Empty;
+
+        var lines = new List<string>();
+        foreach (var key in NativeToolProjector.DisplayArgumentKeys)
+        {
+            if (args[key] is JsonValue value
+                && value.TryGetValue<string>(out var text)
+                && !string.IsNullOrWhiteSpace(text))
+            {
+                lines.Add($"{key}: {text}");
+            }
+        }
+        return string.Join('\n', lines);
     }
 
     private static Element BuildReasoning(ChatTimelineItem entry)

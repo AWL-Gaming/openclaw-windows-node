@@ -142,6 +142,29 @@ public sealed class ChatTimelineRenderIdentityContractTests
             provider);
     }
 
+    [Fact]
+    public void ReactorToolRows_RenderSafeArgsAndLocalizedStatusWithoutChangingRowKeys()
+    {
+        var timeline = Read("src", "OpenClaw.Tray.WinUI", "Chat", "ReactorChatTimeline.cs");
+
+        Assert.Contains("FormatToolDisplayArgs(entry.ToolArgs)", timeline);
+        Assert.Contains("foreach (var key in NativeToolProjector.DisplayArgumentKeys)", timeline);
+        Assert.DoesNotContain(
+            "new[] { \"command\", \"path\", \"file_path\", \"query\", \"url\", \"pattern\" }",
+            timeline);
+        Assert.Contains("Chat_Tool_InputSection", timeline);
+        Assert.Contains("Chat_Status_Running", timeline);
+        Assert.Contains("Chat_Status_Done", timeline);
+        Assert.Contains("Chat_Status_Error", timeline);
+        Assert.Contains("Chat_Status_Interrupted", timeline);
+        Assert.Contains("Chat_Tool_CallLabel", timeline);
+        Assert.Contains("tool-expander:{entry.Id}:collapse:{row.Props.Timeline.ToolCallsCollapseVersion}", timeline);
+        Assert.DoesNotContain("entry.ToolArgs.ToJsonString", timeline);
+        Assert.DoesNotContain("{entry.ToolResult}", timeline);
+        Assert.DoesNotContain("ToolRunId", timeline);
+        Assert.DoesNotContain("ToolLegacyTurn", timeline);
+    }
+
     private static string Read(params string[] parts)
         => File.ReadAllText(Path.Combine(new[] { TestRepositoryPaths.GetRepositoryRoot() }.Concat(parts).ToArray()));
 }
