@@ -165,6 +165,12 @@ operation, and returns the result to the agent.
 
 [Edit the request-routing diagram](diagrams/openclaw-request-and-tool-routing.excalidraw).
 
+The same decision as a time-ordered sequence:
+
+![OpenClaw delete request sequence](diagrams/openclaw-delete-request-sequence.svg)
+
+[Edit the sequence diagram](diagrams/openclaw-delete-request-sequence.excalidraw).
+
 The flow has four stages:
 
 1. **Resolve the target.** Is "this" gateway state, an agent workspace file, an

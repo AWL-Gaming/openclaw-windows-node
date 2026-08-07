@@ -318,7 +318,7 @@ public class McpToolBridge
         ["canvas.caps"] =
             "Report the A2UI feature flags this canvas runtime supports (component catalog, max surfaces, render depth, value-size caps). Diagnostic; no side effects.",
         ["canvas.a2ui.pushJSONL"] =
-            "Streaming variant of canvas.a2ui.push for very large surfaces. Same protocol contract; jsonlPath argument must live under the system temp directory and is opened via FileStream + GetFinalPathNameByHandle to defeat reparse-point traversal.",
+            "Alias of canvas.a2ui.push with the same size/line caps and jsonl/jsonlPath contract. Provided for naming parity; there is no separate streaming path.",
 
         // screen.* — names match the canonical OpenClaw protocol
         // (apps/shared/OpenClawKit/Sources/OpenClawKit/ScreenCommands.swift).

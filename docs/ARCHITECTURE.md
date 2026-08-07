@@ -1,4 +1,4 @@
-# OpenClaw Windows node — architecture ledger
+# OpenClaw Windows node - architecture ledger
 
 This document is the **living source of truth** for the architecture refactor
 that decomposes the repository's god objects. It is required reading before you
@@ -32,7 +32,7 @@ multi-PR refactor plan for the reasoning behind each boundary.
   forwarding, minimal WinUI-only adapters. No gateway JSON parsing, no polling
   loops, no settings mutation, no imperative row factories.
 - **ViewModel / Presenter** (`OpenClaw.Tray.WinUI/ViewModels`, `.../Presentation`):
-  observable state, commands, pure projection. WinUI-free where practical — no
+  observable state, commands, pure projection. WinUI-free where practical - no
   `Microsoft.UI.Xaml`, no `Application.Current`, no `Window`/`Frame`/`Brush`/`Color`,
   no concrete `SettingsManager`. Unit-tested.
 - **Service**: IO, gateway calls, registry/settings persistence, timers, process
@@ -83,7 +83,7 @@ These are the canonical homes. Do not reintroduce private copies elsewhere.
 | `src/OpenClaw.Shared/Models.cs` | per-domain model files + `*Mapper` classes |
 | `src/OpenClaw.Shared/Capabilities/SystemCapability.cs` | `ExecApprovalService` |
 | `src/OpenClaw.Connection/GatewayConnectionManager.cs` | `NodeConnectionCoordinator`, `BootstrapTokenLifecycle`, `DevicePairApprovalCoordinator` |
-| `src/OpenClaw.SetupEngine/SetupSteps.cs` | one file per step; `WslShellClient`, `GatewayConfigScriptBuilder`, `KeepaliveProcessManager`. WSL/POSIX quoting is done — use `WslShellQuoting`, never a local `ShellEscape`. |
+| `src/OpenClaw.SetupEngine/SetupSteps.cs` | one file per step; `WslShellClient`, `GatewayConfigScriptBuilder`, `KeepaliveProcessManager`. WSL/POSIX quoting is done - use `WslShellQuoting`, never a local `ShellEscape`. |
 | Any test hand-rolling a temp dir / env save-restore / CLI capture | `OpenClaw.TestSupport` fixtures |
 
 ## Ledger
@@ -101,7 +101,7 @@ leading and trailing pipe. Columns, in order:
   (validated for format), OR `guard_type` must be `review-only` with a real
   rationale in `guard_test` (placeholders like `-`/`none` are rejected).
 - For `behavioral`/`golden` rows, the named `guard_test` must actually exist in
-  the `tests/` source tree — the consistency test scans for it, so renaming or
+  the `tests/` source tree - the consistency test scans for it, so renaming or
   deleting a guard without updating the ledger fails CI.
 - `source-shape` rows must set a concrete `retirement_condition`.
 - No literal `|` characters inside a cell (they break the pipe-delimited parse).

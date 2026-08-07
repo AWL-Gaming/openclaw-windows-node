@@ -38,7 +38,7 @@ public static class Program
 
     public static async Task<int> Main(string[] args)
     {
-        Console.WriteLine("OpenClaw Setup Engine v0.1");
+        Console.WriteLine($"OpenClaw Setup Engine {AppVersionInfo.DisplayVersion}");
         Console.WriteLine("─────────────────────────────");
 
         if (!TryParseArguments(args, out var parsedArguments, out var argumentError))
@@ -256,7 +256,9 @@ public static class Program
         };
 
         // Run!
-        logger.Info($"{(uninstall ? "Uninstall" : "Setup")} engine starting", new { version = "0.1", args = string.Join(' ', args) });
+        logger.Info(
+            $"{(uninstall ? "Uninstall" : "Setup")} engine starting",
+            new { version = AppVersionInfo.Version, args = string.Join(' ', args) });
 
         PipelineResult result;
         if (uninstall)

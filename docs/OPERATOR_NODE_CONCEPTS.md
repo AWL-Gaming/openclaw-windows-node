@@ -63,17 +63,19 @@ so a new or changed node capability is visible before the gateway can use it.
 
 ## Capability Allowlist
 
-Node Mode advertises available Windows commands, but the gateway decides which
-commands it may call through `gateway.nodes.allowCommands` in
-`~/.openclaw/openclaw.json`. Add exact command names such as `screen.snapshot`,
-`canvas.present`, or `system.run`; wildcard entries are not expanded by the
-gateway.
+Node Mode advertises available Windows commands. The gateway combines the
+paired node's approved declarations, canonical Windows platform defaults,
+`gateway.nodes.allowCommands`, and `gateway.nodes.denyCommands` to decide which
+commands it may call. Explicit allow/deny entries use exact command names;
+wildcards such as `canvas.*` are not expanded.
 
-Privacy-sensitive commands, especially `screen.record`, `camera.snap`,
-`camera.clip`, `stt.transcribe`, `tts.speak`, and `system.run`, should only be
-allowlisted when you want the gateway to be able to request that behavior.
-Windows permissions, Node Mode toggles, and the local exec policy can still add
-stricter checks.
+Canonical paired Windows nodes already receive desktop defaults for
+`system.run`, `system.run.prepare`, `system.which`, and `system.notify`. That
+gateway default does not bypass the local **Run system tools** switch, Windows
+V2 exec approvals, or sandbox policy. Commands outside the Windows defaults,
+especially `screen.record`, `camera.snap`, `camera.clip`, `stt.transcribe`, and
+`tts.speak`, should be allowlisted only when you want the gateway to request
+that behavior.
 
 ## Where to Go Next
 

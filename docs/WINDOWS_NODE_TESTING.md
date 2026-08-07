@@ -147,7 +147,7 @@ Local MCP clients also see MCP-only `app.*` commands such as `app.navigate`, `ap
 ### Browser control stays enabled but never declares `browser`
 - Setup-code / QR pairing can connect with a device token and leave `GatewayRecord.SharedGatewayToken` empty. Browser control will not declare `browser` / `browser.proxy` until a shared gateway token is saved for that gateway.
 - Expect Connection capability pills to say **Needs gateway shared token** (not "Enabled, not active yet") only while the node WebSocket session is live and the shared token is missing. Disconnected or attached-but-disconnected states should ask for reconnect, not a token paste. The pill keeps that short label; its tooltip matches Command Center remediation detail.
-- Command Center, Connection pill tooltips, and `app.connection.status` / `app.connection.gateways` use the same live-session rule for the shared-token caveat. For a remote (non-loopback) gateway without an explicit `BrowserControlPort` or SSH browser-proxy forward — including SSH tunnels whose effective URL is `127.0.0.1` — that caveat also mentions the endpoint/forward requirement; the shared token alone is not enough for usable remote browser.proxy.
+- Command Center, Connection pill tooltips, and `app.connection.status` / `app.connection.gateways` use the same live-session rule for the shared-token caveat. For a remote (non-loopback) gateway without an explicit `BrowserControlPort` or SSH browser-proxy forward - including SSH tunnels whose effective URL is `127.0.0.1` - that caveat also mentions the endpoint/forward requirement; the shared token alone is not enough for usable remote browser.proxy.
 - Enter the gateway shared token in Settings, save, and reconnect node mode. Bootstrap tokens are not the shared gateway token.
 
 ### `browser.proxy` reports no browser-control host
@@ -182,7 +182,14 @@ Local MCP clients also see MCP-only `app.*` commands such as `app.navigate`, `ap
 - Run it when validating the Gateway/Windows node runtime path, not just direct MCP or shared library behavior.
 - GitHub-hosted Actions runners do not provide a working MXC/AppContainer runtime. The regular cloud E2E matrix should report these MXC proofs as skipped while still running the rest of setup-connect. Run the proof on a local MXC-enabled Windows machine. Only set `OPENCLAW_RUN_MXC_E2E=1` in GitHub Actions when using an MXC-enabled self-hosted runner.
 - Use `.\scripts\validate-mxc-e2e.ps1` for normal local validation. It sets `OPENCLAW_RUN_E2E` and `OPENCLAW_RUN_MXC_E2E`, runs the real Gateway MXC proofs, and fails if the MXC proof skips. `-AllowSkip` is only for documenting a non-MXC host, not for merge validation of MXC-related work.
-- When reproducing this manually against an existing Gateway, make sure `gateway.nodes.allowCommands` includes `system.run`, `system.run.prepare`, and `system.which`, then approve any `pending-reapproval` request with `openclaw nodes approve <pendingRequestId>`. The node can advertise `system.run` while the Gateway still blocks it until both gates are updated.
+- When reproducing this manually against an existing Gateway, confirm
+  `gateway.nodes.denyCommands` does not block `system.run`,
+  `system.run.prepare`, or `system.which`, then approve any
+  `pending-reapproval` request with
+  `openclaw nodes approve <pendingRequestId>`. Current gateways include these
+  commands in the canonical Windows desktop defaults. Older or deliberately
+  customized gateways may still need exact `gateway.nodes.allowCommands`
+  entries.
 
   ```powershell
   .\build.ps1

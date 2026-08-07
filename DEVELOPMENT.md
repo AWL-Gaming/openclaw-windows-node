@@ -8,6 +8,7 @@ A comprehensive guide for building, running, and contributing to the OpenClaw Wi
 - [Project Structure](#project-structure)
 - [Building](#building)
 - [Architecture Overview](#architecture-overview)
+- [Documentation and Diagrams](#documentation-and-diagrams)
 - [Testing](#testing)
 - [CI/CD](#cicd)
 - [Contributing](#contributing)
@@ -257,7 +258,7 @@ src/OpenClawTray.FunctionalUI/   Component · RenderContext · FunctionalHostCon
 - One `OpenClawChatDataProvider` instance lives on `App` (`App.ChatProvider`),
   created in `InitializeGatewayClient` and disposed inside
   `UnsubscribeGatewayEvents`. Both the Hub Chat tab and the tray ChatWindow
-  consume the same provider — opening either surface shows identical state.
+  consume the same provider - opening either surface shows identical state.
 - Each XAML host (`ChatPage`, `ChatWindow`) mounts its own `FunctionalHostControl`
   with `ContentTarget` pointing at a `<Border x:Name="ChatHost"/>`. The
   surrounding chrome (NavigationView, popup header) stays XAML.
@@ -463,6 +464,38 @@ In DEBUG builds, logs are also written to Visual Studio Output window via `Syste
 **Security:**
 Sensitive data (authentication tokens) are never logged.
 
+## Documentation and Diagrams
+
+Maintained architecture, data-flow, and sequence diagrams use a paired source
+and rendered artifact:
+
+```text
+docs/diagrams/<name>.excalidraw
+docs/diagrams/<name>.svg
+```
+
+Embed the SVG in Markdown so GitHub renders it, and place an adjacent link to
+the `.excalidraw` source so contributors can edit it. Keep labels synchronized
+between both files. Every text element in the Excalidraw JSON must have explicit
+`width` and `height` and use black text; container boxes remain transparent.
+
+Do not add new Mermaid or maintained ASCII-art architecture diagrams. Small
+state notations, directory trees, wire examples, and command-output snippets
+may remain as fenced text when their value is the literal text rather than a
+visual layout. Historical design documents may retain clearly labeled inline
+sketches, but they must link to the current canonical diagram when one exists.
+
+Run documentation validation directly with:
+
+```powershell
+.\scripts\validate-docs.ps1
+```
+
+`.\build.ps1` runs the same validator before compiling. It checks maintained
+Markdown links and anchors, rejects Mermaid and em dashes, verifies every
+Excalidraw/SVG pair, requires SVG accessibility metadata, and confirms rendered
+labels match the editable source.
+
 ## Testing
 
 Required agent validation lives in [AGENTS.md](AGENTS.md). For changes touching
@@ -611,8 +644,13 @@ The CI builds multiple configurations:
 
 **Test Job:**
 - Runs on `windows-latest`
-- Builds Shared library, Tray app (WinUI), Tests (Shared + Tray)
-- Runs unit tests: `dotnet test tests/OpenClaw.Shared.Tests` and `dotnet test tests/OpenClaw.Tray.Tests`
+- Builds the Shared library, Tray app, and eight test projects: Shared, Tray,
+  Connection, WinNode CLI, Tray Integration, FunctionalUI, SetupEngine, and
+  Tray UI
+- Runs unit, integration, native UI, and accessibility tests across those
+  projects; see [docs/TEST_COVERAGE.md](docs/TEST_COVERAGE.md)
+- Verifies the WinUI DevBuild identity marker after native UI and accessibility
+  tests
 - Uses GitVersion for semantic versioning
 
 **Build Job (Tray):**
@@ -850,12 +888,12 @@ Direct `dotnet build` without the script will fail with "WindowsAppSDKSelfContai
 
 ### Architecture
 
-- **FunctionalUI**: `src/OpenClawTray.FunctionalUI/` — Minimal declarative WinUI helper layer used by onboarding
-- **Pages**: `src/OpenClaw.Tray.WinUI/Onboarding/Pages/` — Functional UI components for each wizard screen
-- **Services**: `src/OpenClaw.Tray.WinUI/Onboarding/Services/` — State management, setup code decoder, permission checker, health check, input validation
-- **Widgets**: `src/OpenClaw.Tray.WinUI/Onboarding/Widgets/` — Shared UI components (cards, step indicators, feature rows)
-- **Window**: `src/OpenClaw.Tray.WinUI/Onboarding/OnboardingWindow.cs` — Host window with WebView2 overlay for chat
-- **Helpers**: `src/OpenClaw.Tray.WinUI/Helpers/GatewayChatHelper.cs` — Shared WebView2 chat URL builder
+- **FunctionalUI**: `src/OpenClawTray.FunctionalUI/` - Minimal declarative WinUI helper layer used by onboarding
+- **Pages**: `src/OpenClaw.Tray.WinUI/Onboarding/Pages/` - Functional UI components for each wizard screen
+- **Services**: `src/OpenClaw.Tray.WinUI/Onboarding/Services/` - State management, setup code decoder, permission checker, health check, input validation
+- **Widgets**: `src/OpenClaw.Tray.WinUI/Onboarding/Widgets/` - Shared UI components (cards, step indicators, feature rows)
+- **Window**: `src/OpenClaw.Tray.WinUI/Onboarding/OnboardingWindow.cs` - Host window with WebView2 overlay for chat
+- **Helpers**: `src/OpenClaw.Tray.WinUI/Helpers/GatewayChatHelper.cs` - Shared WebView2 chat URL builder
 
 ---
 

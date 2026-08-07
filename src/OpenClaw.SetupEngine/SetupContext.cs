@@ -333,8 +333,6 @@ public sealed class TraySettingsConfig
 
 public sealed class PairingConfig
 {
-    // TODO: Wire OperatorScopes/NodeScopes/CliScopes into pairing requests
-    // when the gateway protocol supports scoped token issuance.
     public int TimeoutSeconds { get; set; } = 60;
 }
 

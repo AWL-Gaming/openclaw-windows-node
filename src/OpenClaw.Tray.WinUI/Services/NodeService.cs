@@ -2063,8 +2063,8 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
     // STT handlers
     //
     // Single engine: VoiceService (Whisper.net + NAudio + Silero VAD).
-    // The legacy WinRT/SAPI engine and the engine selector have been
-    // removed — see Audio_FollowUps.md for the rationale.
+    // The legacy WinRT/SAPI engine and engine selector were removed; the
+    // current path stays local and uses one consent/error model.
     //
     // When the Whisper model isn't downloaded yet, every stt.* call
     // returns a clear error pointing the caller at the Voice Settings
