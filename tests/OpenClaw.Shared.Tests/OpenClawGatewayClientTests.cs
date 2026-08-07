@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.WebSockets;
 using System.Text.Json;
 using Xunit;
 using OpenClaw.Shared;
@@ -106,7 +107,7 @@ public class OpenClawGatewayClientTests
             var method = typeof(OpenClawGatewayClient).GetMethod(
                 "ClearPendingRequests",
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            method!.Invoke(_client, Array.Empty<object>());
+            method!.Invoke(_client, [null]);
         }
 
         public void OnDisconnected()
@@ -523,6 +524,7 @@ public class OpenClawGatewayClientTests
 
             return (wizardResponses.Count, requestMethods.Count);
         }
+
     }
 
     private static string CreateTempIdentityPath() =>
@@ -680,6 +682,44 @@ public class OpenClawGatewayClientTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             async () => await responseTask.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal((0, 0), helper.GetPendingRequestCounts());
+    }
+
+    [Fact]
+    public async Task SendWizardRequestAsync_ServiceRestartClose_PreservesCloseStatus()
+    {
+        using var server = new LoopbackWebSocketServer(useManagedWebSocket: true);
+        using var identity = new TempDirectory("wizard-request-");
+        await server.StartAsync();
+        var helper = new GatewayClientTestHelper(
+            gatewayUrl: server.WebSocketUrl,
+            identityPath: identity.Path);
+        using var client = helper.Client;
+        await client.ConnectAsync();
+        helper.ProcessRawMessage("""
+        {
+            "type": "res",
+            "id": "req-hello-restart",
+            "payload": {
+                "type": "hello-ok"
+            }
+        }
+        """);
+        Assert.True(client.HasHandshakeSnapshot);
+
+        var responseTask = client.SendWizardRequestAsync("wizard.next", timeoutMs: 10_000);
+        await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        await server.CloseSocketAsync(
+            0,
+            (WebSocketCloseStatus)1012,
+            "service restart");
+
+        var exception = await Assert.ThrowsAsync<GatewayConnectionLostException>(
+            async () => await responseTask.WaitAsync(TimeSpan.FromSeconds(2)));
+
+        Assert.Equal(1012, exception.CloseStatusCode);
+        Assert.Equal("service restart", exception.CloseStatusDescription);
+        Assert.False(client.HasHandshakeSnapshot);
         Assert.Equal((0, 0), helper.GetPendingRequestCounts());
     }
 
@@ -1972,7 +2012,9 @@ public class OpenClawGatewayClientTests
         // slopwatch-ignore: SW004 Test delay is an intentional bounded async wait; replacing it would change the scenario under test.
         var completed = await Task.WhenAny(task, Task.Delay(250));
         Assert.Same(task, completed);
-        await Assert.ThrowsAsync<OperationCanceledException>(async () => await task);
+        var exception = await Assert.ThrowsAsync<GatewayConnectionLostException>(
+            async () => await task);
+        Assert.Null(exception.CloseStatusCode);
     }
 
         [Fact]

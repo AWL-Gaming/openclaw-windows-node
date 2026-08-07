@@ -2003,8 +2003,14 @@ public sealed class PairOperatorStep : SetupStep
 
     internal static async Task<StepResult?> EnsurePairingEndpointTrustedAsync(
         SetupContext ctx,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int noListenerRetryCount = 0,
+        TimeSpan? noListenerRetryDelay = null)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(noListenerRetryCount);
+        var retryDelay = noListenerRetryDelay ?? TimeSpan.FromSeconds(1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(retryDelay, TimeSpan.Zero);
+
         var record = new GatewayRecord
         {
             Id = ctx.GatewayRecordId ?? "setup-managed-gateway",
@@ -2015,7 +2021,13 @@ public sealed class PairOperatorStep : SetupStep
         var probe = ctx.EndpointProvenanceProbe ??
             new ManagedLocalGatewayPortProvenanceService(
                 new SetupOpenClawLogger(ctx.Logger)).InspectAsync;
-        var provenance = await probe(record, cancellationToken).ConfigureAwait(false);
+        var provenance =
+            await GatewayWizardRestartRecoveryPolicy.WaitForExpectedManagedGatewayAsync(
+                cancellationToken => probe(record, cancellationToken),
+                noListenerRetryCount,
+                retryDelay,
+                cancellationToken).ConfigureAwait(false);
+
         return provenance.Kind switch
         {
             GatewayEndpointProvenanceKind.ExpectedManagedGateway or
@@ -2030,11 +2042,17 @@ public sealed class PairOperatorStep : SetupStep
 
     internal static void ApplyReconnectAuthorization(
         WebSocketClientBase client,
-        SetupContext ctx)
+        SetupContext ctx,
+        int provenanceRetryCount = 0,
+        TimeSpan? provenanceRetryDelay = null)
     {
         client.ReconnectAuthorizationAsync = async cancellationToken =>
         {
-            var failure = await EnsurePairingEndpointTrustedAsync(ctx, cancellationToken).ConfigureAwait(false);
+            var failure = await EnsurePairingEndpointTrustedAsync(
+                ctx,
+                cancellationToken,
+                provenanceRetryCount,
+                provenanceRetryDelay).ConfigureAwait(false);
             return failure is null
                 ? ReconnectAuthorizationResult.AllowedResult
                 : new ReconnectAuthorizationResult(
@@ -2193,25 +2211,50 @@ public sealed class PairOperatorStep : SetupStep
 
     internal enum ConnectionOutcome { Connected, PairingRequired, Error, Timeout }
 
+    internal static ConnectionOutcome? ClassifySetupConnectionStatus(
+        ConnectionStatus status,
+        bool isPairingRequired,
+        int? lastRemoteCloseStatusCode,
+        bool retryGatewayStartupDisconnects) =>
+        status switch
+        {
+            ConnectionStatus.Connected => ConnectionOutcome.Connected,
+            ConnectionStatus.Error => ConnectionOutcome.Error,
+            ConnectionStatus.Disconnected when isPairingRequired =>
+                ConnectionOutcome.PairingRequired,
+            ConnectionStatus.Disconnected when
+                retryGatewayStartupDisconnects &&
+                GatewayWizardRestartRecoveryPolicy.IsRetryableGatewayStartupDisconnect(
+                    lastRemoteCloseStatusCode) => null,
+            ConnectionStatus.Disconnected => ConnectionOutcome.Error,
+            _ => null,
+        };
+
     internal static async Task<ConnectionOutcome> WaitForConnectionOrPairing(
-        OpenClawGatewayClient client, SetupContext ctx, TimeSpan timeout, CancellationToken ct)
+        OpenClawGatewayClient client,
+        SetupContext ctx,
+        TimeSpan timeout,
+        CancellationToken ct,
+        bool retryGatewayStartupDisconnects = false)
     {
         var tcs = new TaskCompletionSource<ConnectionOutcome>();
 
         void OnStatusChanged(object? sender, ConnectionStatus status)
         {
             ctx.Logger.Debug($"Operator connection status: {status}");
-            if (status == ConnectionStatus.Connected)
-                tcs.TrySetResult(ConnectionOutcome.Connected);
-            else if (status == ConnectionStatus.Error)
-                tcs.TrySetResult(ConnectionOutcome.Error);
+            var outcome = ClassifySetupConnectionStatus(
+                status,
+                client.IsPairingRequired,
+                client.LastRemoteCloseStatusCode,
+                retryGatewayStartupDisconnects);
+            if (outcome is not null)
+            {
+                tcs.TrySetResult(outcome.Value);
+            }
             else if (status == ConnectionStatus.Disconnected)
             {
-                // Check if pairing was required — client sets IsPairingRequired before disconnect
-                if (client.IsPairingRequired)
-                    tcs.TrySetResult(ConnectionOutcome.PairingRequired);
-                else
-                    tcs.TrySetResult(ConnectionOutcome.Error);
+                ctx.Logger.Debug(
+                    "Gateway is still starting after restart; waiting for the authenticated reconnect.");
             }
         }
 

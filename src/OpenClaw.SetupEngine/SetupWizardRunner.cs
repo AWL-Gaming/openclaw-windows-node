@@ -33,6 +33,8 @@ public sealed class SetupWizardRunner
         if (record == null)
             return StepResult.Fail("Cannot run gateway wizard because no active gateway record was found.");
 
+        var isManagedLocalGateway =
+            GatewayHostAccessClassifier.Classify(record).CanControlWslGateway;
         var identityPath = registry.GetIdentityDirectory(record.Id);
         string? storedDeviceToken;
         try
@@ -112,13 +114,69 @@ public sealed class SetupWizardRunner
 
             // A reconnect restarts the wizard session, so reset replay-scoped
             // counters before processing the replacement start payload.
-            async Task<JsonElement> SendWizardNextAsync(object parameters, int timeoutMs)
+            async Task<JsonElement> SendWizardNextAsync(
+                object parameters,
+                int timeoutMs,
+                string stepId,
+                string stepTitle,
+                string stepMessage)
             {
                 try
                 {
                     return await client!.SendWizardRequestAsync("wizard.next", parameters, timeoutMs);
                 }
-                catch (Exception ex) when (!ct.IsCancellationRequested && IsRestartLikeWizardDisconnect(ex) && restartAttempts < 2)
+                catch (Exception ex) when (
+                    !ct.IsCancellationRequested &&
+                    isManagedLocalGateway &&
+                    GatewayWizardRestartRecoveryPolicy.IsExpectedTerminalRestart(
+                        _ctx.Config.Gateway.Version,
+                        stepId,
+                        ex,
+                        stepTitle,
+                        stepMessage))
+                {
+                    try { await client!.DisconnectAsync(); } catch { }
+                    client!.Dispose();
+
+                    var restartProvenance =
+                        await PairOperatorStep.EnsurePairingEndpointTrustedAsync(
+                            _ctx,
+                            ct,
+                            noListenerRetryCount: 30,
+                            noListenerRetryDelay: TimeSpan.FromSeconds(1));
+                    if (restartProvenance is not null)
+                    {
+                        throw new WizardFatalException(
+                            restartProvenance.Message ??
+                            "Gateway ownership changed during the terminal restart.");
+                    }
+
+                    client = CreateWizardClient(
+                        credential,
+                        identityPath,
+                        wsLogger,
+                        restartRecovery: true);
+                    var reconnect = await PairOperatorStep.WaitForConnectionOrPairing(
+                        client,
+                        _ctx,
+                        TimeSpan.FromSeconds(30),
+                        ct,
+                        retryGatewayStartupDisconnects: true);
+                    if (reconnect != PairOperatorStep.ConnectionOutcome.Connected)
+                    {
+                        throw new WizardFatalException(
+                            $"Gateway wizard reconnect failed after the terminal restart: {reconnect}");
+                    }
+
+                    wizardCompleted = true;
+                    _ctx.Logger.Info(
+                        "Gateway restarted after applying the terminal 2026.7.1 wizard answer; endpoint ownership and the authenticated reconnect were verified.");
+                    return JsonSerializer.SerializeToElement(new { done = true });
+                }
+                catch (Exception ex) when (
+                    !ct.IsCancellationRequested &&
+                    GatewayWizardRestartRecoveryPolicy.IsRestartLikeDisconnect(ex) &&
+                    restartAttempts < 2)
                 {
                     restartAttempts++;
                     _ctx.Logger.Warn($"Gateway restarted during wizard; reconnecting and replaying answers (attempt {restartAttempts}/2): {ex.Message}");
@@ -128,11 +186,24 @@ public sealed class SetupWizardRunner
 
                     await Task.Delay(TimeSpan.FromSeconds(3), ct);
                     var restartProvenance =
-                        await PairOperatorStep.EnsurePairingEndpointTrustedAsync(_ctx, ct);
+                        await PairOperatorStep.EnsurePairingEndpointTrustedAsync(
+                            _ctx,
+                            ct,
+                            noListenerRetryCount: 30,
+                            noListenerRetryDelay: TimeSpan.FromSeconds(1));
                     if (restartProvenance is not null)
                         throw new WizardFatalException(restartProvenance.Message ?? "Gateway ownership changed.");
-                    client = CreateWizardClient(credential, identityPath, wsLogger);
-                    var reconnect = await PairOperatorStep.WaitForConnectionOrPairing(client, _ctx, TimeSpan.FromSeconds(30), ct);
+                    client = CreateWizardClient(
+                        credential,
+                        identityPath,
+                        wsLogger,
+                        restartRecovery: true);
+                    var reconnect = await PairOperatorStep.WaitForConnectionOrPairing(
+                        client,
+                        _ctx,
+                        TimeSpan.FromSeconds(30),
+                        ct,
+                        retryGatewayStartupDisconnects: true);
                     if (reconnect != PairOperatorStep.ConnectionOutcome.Connected)
                         throw new WizardFatalException($"Gateway wizard reconnect failed after restart: {reconnect}");
 
@@ -211,7 +282,12 @@ public sealed class SetupWizardRunner
                         : $"Wizard progress: {progressText}");
 
                     await Task.Delay(WizardTimeouts.ProgressPollDelay, ct);
-                    payload = await SendWizardNextAsync(WizardNextPayload.Acknowledge(sessionId, parsed.StepId), TimeoutFor(parsed));
+                    payload = await SendWizardNextAsync(
+                        WizardNextPayload.Acknowledge(sessionId, parsed.StepId),
+                        TimeoutFor(parsed),
+                        parsed.StepId,
+                        parsed.Title,
+                        parsed.Message);
                     continue;
                 }
 
@@ -252,7 +328,12 @@ public sealed class SetupWizardRunner
                     }
                     : WizardNextPayload.Acknowledge(sessionId, parsed.StepId);
 
-                payload = await SendWizardNextAsync(parameters, TimeoutFor(parsed, answerResult.Answer));
+                payload = await SendWizardNextAsync(
+                    parameters,
+                    TimeoutFor(parsed, answerResult.Answer),
+                    parsed.StepId,
+                    parsed.Title,
+                    parsed.Message);
             }
         }
         catch (OperationCanceledException)
@@ -285,13 +366,21 @@ public sealed class SetupWizardRunner
         }
     }
 
-    private OpenClawGatewayClient CreateWizardClient(string credential, string identityPath, IOpenClawLogger wsLogger)
+    private OpenClawGatewayClient CreateWizardClient(
+        string credential,
+        string identityPath,
+        IOpenClawLogger wsLogger,
+        bool restartRecovery = false)
     {
         var client = new OpenClawGatewayClient(_ctx.GatewayUrl!, credential, logger: wsLogger, identityPath: identityPath)
         {
             UseV2Signature = true
         };
-        PairOperatorStep.ApplyReconnectAuthorization(client, _ctx);
+        PairOperatorStep.ApplyReconnectAuthorization(
+            client,
+            _ctx,
+            provenanceRetryCount: restartRecovery ? 30 : 0,
+            provenanceRetryDelay: TimeSpan.FromSeconds(1));
         return client;
     }
 
@@ -509,13 +598,6 @@ public sealed class SetupWizardRunner
             step.StepType,
             step.Options,
             answer);
-
-    private static bool IsRestartLikeWizardDisconnect(Exception ex)
-    {
-        return ex.Message.Contains("connection lost", StringComparison.OrdinalIgnoreCase)
-            || ex.Message.Contains("gateway restarting", StringComparison.OrdinalIgnoreCase)
-            || ex.Message.Contains("service restart", StringComparison.OrdinalIgnoreCase);
-    }
 
     private static bool IsKnownGatewayFinalizationPromptBug(string error)
     {
