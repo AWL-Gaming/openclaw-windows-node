@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 
 namespace OpenClaw.Tray.Tests;
 
@@ -437,6 +438,133 @@ public sealed class AppRefactorContractTests
     }
 
     [Fact]
+    public void PermissionsPage_ExecPolicyEditor_IsExecutablePathAllowlistOnly()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var xaml = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "Pages", "PermissionsPage.xaml"));
+        var resources = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Strings",
+            "en-us",
+            "Resources.resw"));
+
+        Assert.Single(Regex.Matches(xaml, "<ComboBox ").Cast<Match>());
+        Assert.DoesNotContain("x:Name=\"NewRuleAction\"", xaml);
+        Assert.DoesNotContain("PermissionsPage_NewRuleAction", xaml);
+        Assert.Contains("x:Name=\"ExecAllowlistPatternValidation\"", xaml);
+        Assert.Contains("AutomationProperties.AutomationId=\"ExecAllowlistPatternValidation\"", xaml);
+        Assert.Contains("AutomationProperties.LiveSetting=\"Assertive\"", xaml);
+        Assert.Matches(
+            new Regex("x:Name=\"RulesEmptyState\"[\\s\\S]*?TextWrapping=\"Wrap\"[\\s\\S]*?Visibility=\"Collapsed\""),
+            xaml);
+
+        Assert.Contains("<value>Executable-path allowlist</value>", resources);
+        Assert.Contains(
+            "<value>Controls which executables the agent can launch on this node. The executable-path allowlist starts empty.</value>",
+            resources);
+        Assert.Contains(
+            "<value>Allow Always creates an argument-bound entry for an eligible native .exe command. Entries added here are path-only and can allow matching executables with any arguments. Deny and Ask remain controlled by Default action. Changes save automatically.</value>",
+            resources);
+        Assert.Contains(
+            "<value>No executable-path allowlist entries. Approve an eligible native .exe command with Allow Always, or add a path-only pattern such as **/hostname.exe.</value>",
+            resources);
+        Assert.Contains(
+            "<value>Enter an executable-path pattern such as **/hostname.exe. Basename or command-text patterns such as hostname are invalid.</value>",
+            resources);
+        Assert.Contains("<value>Add entry</value>", resources);
+        Assert.DoesNotContain("<value>Add Rule</value>", resources);
+    }
+
+    [Fact]
+    public void PermissionsPage_ExecPolicyCopy_IsLocalizedAcrossSupportedLocales()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var stringsRoot = Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "Strings");
+        var enUs = ReadReswValues(Path.Combine(stringsRoot, "en-us", "Resources.resw"));
+        var localizedKeys = new[]
+        {
+            "PermissionsPage_TextBlock_17.Text",
+            "PermissionsPage_TextBlock_28.Text",
+        };
+        var hostnameExampleKeys = new[]
+        {
+            "PermissionsPage_NoRulesYetAdd.Text",
+            "PermissionsPage_ExecAllowlistPatternValidation.Text",
+        };
+        const string runtimeContractKey = "PermissionsPage_PatternsAreMatchedLeft.Text";
+
+        foreach (var locale in new[] { "fr-fr", "nl-nl", "zh-cn", "zh-tw" })
+        {
+            var localized = ReadReswValues(Path.Combine(stringsRoot, locale, "Resources.resw"));
+            foreach (var key in localizedKeys)
+            {
+                var value = Assert.Contains(key, localized);
+                Assert.NotEmpty(value);
+                Assert.NotEqual(enUs[key], value);
+            }
+
+            foreach (var key in hostnameExampleKeys)
+            {
+                var value = Assert.Contains(key, localized);
+                Assert.NotEmpty(value);
+                Assert.Contains("hostname.exe", value, StringComparison.Ordinal);
+                Assert.DoesNotContain("git.exe", value, StringComparison.OrdinalIgnoreCase);
+                Assert.NotEqual(enUs[key], value);
+            }
+
+            var runtimeContract = Assert.Contains(runtimeContractKey, localized);
+            Assert.NotEmpty(runtimeContract);
+            Assert.Contains(".exe", runtimeContract, StringComparison.OrdinalIgnoreCase);
+            Assert.NotEqual(enUs[runtimeContractKey], runtimeContract);
+        }
+    }
+
+    [Fact]
+    public void PermissionsPage_ExecPolicyValidation_PersistsUntilValidAdd()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var source = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "Pages", "PermissionsPage.xaml.cs"));
+        var addRule = ExtractMethod(source, "OnAddRule");
+        var showValidation = ExtractMethod(source, "ShowExecAllowlistPatternValidation");
+        var hideValidation = ExtractMethod(source, "HideExecAllowlistPatternValidation");
+
+        AssertInOrder(
+            addRule,
+            "if (string.IsNullOrEmpty(pattern))",
+            "ShowExecAllowlistPatternValidation();",
+            "return;",
+            "if (!ExecApprovalsStore.IsValidAllowlistPattern(pattern))",
+            "ShowExecAllowlistPatternValidation();",
+            "return;",
+            "ExecPolicyRuleList.UpsertByPattern(_policyRules, pattern, \"allow\");",
+            "NewRulePattern.Text = \"\";",
+            "HideExecAllowlistPatternValidation();",
+            "RefreshPolicyRulesList();");
+
+        AssertInOrder(
+            showValidation,
+            "ExecAllowlistPatternValidation.Visibility = Visibility.Visible;",
+            "AutomationProperties.SetHelpText(",
+            "NewRulePattern,",
+            "ExecAllowlistPatternValidation.Text);",
+            "NewRulePattern.Focus(FocusState.Programmatic);",
+            "DispatcherQueue.TryEnqueue(",
+            "DispatcherQueuePriority.Low",
+            "ExecAllowlistPatternValidation.Visibility == Visibility.Visible",
+            "ExecAllowlistPatternValidation.StartBringIntoView(",
+            "new BringIntoViewOptions { AnimationDesired = false });");
+        Assert.DoesNotContain("UpdateLayout()", showValidation);
+        AssertInOrder(
+            hideValidation,
+            "ExecAllowlistPatternValidation.Visibility = Visibility.Collapsed;",
+            "AutomationProperties.SetHelpText(",
+            "NewRulePattern,",
+            "string.Empty);");
+    }
+
+    [Fact]
     public void App_ExecApprovalsStore_UsesRoamingProductionDataRoot()
     {
         var source = ReadAppSources();
@@ -468,7 +596,7 @@ public sealed class AppRefactorContractTests
 
         Assert.Contains("AutomationProperties.Name=\"{Binding RemoveRuleAutomationName}\"", xaml);
         Assert.Contains("AutomationProperties.AutomationId=\"{Binding RemoveRuleAutomationId}\"", xaml);
-        Assert.Contains("RemoveRuleAutomationName = $\"Remove rule {r.Pattern}\"", codeBehind);
+        Assert.Contains("RemoveRuleAutomationName = $\"Remove allowlist entry {r.Pattern}\"", codeBehind);
         Assert.Contains("RemoveRuleAutomationId = $\"RemoveExecPolicyRuleButton_{r.Index}\"", codeBehind);
     }
 
@@ -1210,6 +1338,16 @@ public sealed class AppRefactorContractTests
         return File.ReadAllText(Path.Combine(
             root, "src", "OpenClaw.Tray.WinUI", "Chat", "OpenClawComposer.cs"));
     }
+
+    private static Dictionary<string, string> ReadReswValues(string path) =>
+        XDocument.Load(path)
+            .Root!
+            .Elements("data")
+            .Where(element => element.Attribute("name") is not null)
+            .ToDictionary(
+                element => element.Attribute("name")!.Value,
+                element => element.Element("value")?.Value ?? string.Empty,
+                StringComparer.Ordinal);
 
     private static string ExtractMethod(string source, string methodName)
     {
