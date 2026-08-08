@@ -2046,7 +2046,8 @@ public sealed class PairOperatorStep : SetupStep
         int provenanceRetryCount = 0,
         TimeSpan? provenanceRetryDelay = null)
     {
-        client.ReconnectAuthorizationAsync = async cancellationToken =>
+        async Task<ReconnectAuthorizationResult> AuthorizeCredentialHandoffAsync(
+            CancellationToken cancellationToken)
         {
             var failure = await EnsurePairingEndpointTrustedAsync(
                 ctx,
@@ -2059,7 +2060,20 @@ public sealed class PairOperatorStep : SetupStep
                     false,
                     GatewayErrorKind.LocalPortConflict,
                     failure.Message);
-        };
+        }
+
+        client.ReconnectAuthorizationAsync = AuthorizeCredentialHandoffAsync;
+        switch (client)
+        {
+            case OpenClawGatewayClient gatewayClient:
+                gatewayClient.HandshakeAuthorizationAsync =
+                    AuthorizeCredentialHandoffAsync;
+                break;
+            case WindowsNodeClient nodeClient:
+                nodeClient.HandshakeAuthorizationAsync =
+                    AuthorizeCredentialHandoffAsync;
+                break;
+        }
     }
 
     /// <summary>

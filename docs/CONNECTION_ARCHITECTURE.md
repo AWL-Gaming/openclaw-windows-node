@@ -170,6 +170,8 @@ Many gateway records may be saved, but only `ActiveId` in `gateways.json` is the
 
 `SettingsManager` still owns general tray settings (node mode, MCP mode, SSH tunnel toggles, notifications, UI preferences). It may read legacy `Token` / `BootstrapToken` JSON fields into memory for migration, but save must not write those legacy credential fields back.
 
+`GatewayDirectConnectService` is the single transaction owner for direct-connect UI surfaces. It commits the registry and active id, applies identity changes, persists `SettingsManager`, waits for a terminal manager state, and rolls back ordinary asynchronous connection failures as well as thrown failures. When the operation replaced a live operator connection, successful rollback reconnects that previous gateway before returning the failure. The Connection page and Connection Status window only validate controls and render the result. MCP shared-token replacement keeps its device-token-preserving validation semantics, then asks this service to synchronize the committed active gateway into settings and the runtime tunnel.
+
 ## Credential precedence
 
 Credential resolution order is intentionally strict:
@@ -228,12 +230,12 @@ Both paths dispose old clients before creating new ones.
 
 Setup codes (from QR scan or paste) decode to `{ url, bootstrapToken }` via `SetupCodeDecoder`. The flow:
 
-1. `ApplySetupCodeAsync(code)` decodes and validates
-2. Creates/updates a `GatewayRecord` with the bootstrap token
-3. Clears stored device tokens (fresh pairing)
-4. Connects to the new gateway
-5. Gateway returns `hello-ok.auth.deviceToken` after pairing
-6. Connection manager persists the device token to the identity file
+1. `ApplySetupCodeAsync(code)` decodes and validates the gateway URL and bootstrap token
+2. Creates/updates and persists the active `GatewayRecord`, preserving any shared token and durable per-role device tokens
+3. Disconnects the previous connection only after the record is durable
+4. Forces `auth.bootstrapToken` for this connection attempt without clearing stored device tokens; the record-scoped force flag is consumed or cleared even when identity loading fails
+5. After successful pairing, the gateway returns `hello-ok.auth.deviceToken` and the connection manager persists the replacement role token
+6. If pairing or connection fails, the previously stored device tokens remain intact, so retrying or returning to the prior pairing does not require an unintended full re-pair
 
 **Approval boundaries**: `GatewayConnectionManager` leaves node-pair command-trust requests and reapproval pending for explicit operator approval. It may automatically approve and reconnect only an explicitly typed device-pair request used for a device role upgrade.
 
@@ -247,7 +249,9 @@ When **another** device or node requests pairing, the gateway broadcasts `device
 
 `SshTunnelService` manages an SSH local port-forward process and implements `ISshTunnelManager` directly for the connection manager.
 
-When a `GatewayRecord` has `SshTunnel` config, the connection manager starts the tunnel before connecting the WebSocket client to `ws://localhost:<localPort>`. The config stores the SSH daemon port (`sshPort`, default `22`) separately from the remote gateway port forwarded by `-L`.
+When a `GatewayRecord` has `SshTunnel` config, the connection manager starts the tunnel before connecting the WebSocket client to `ws://localhost:<localPort>`. The config stores the SSH daemon port (`sshPort`, default `22`) separately from the remote gateway port forwarded by `-L`. Startup allows up to 20 seconds for SSH transport, key exchange, authentication, and local-forward binding, while every sample still fails closed on incomplete listener capture or a conflicting loopback/wildcard owner. Same-number listeners bound only to non-loopback interfaces are irrelevant to the local forward and are ignored.
+
+Credential handoff pins the verified tunnel lifecycle generation (or managed-local process identity) from preflight through the initial challenge authorization. If ownership changes between WebSocket acceptance and the credential frame, the current socket is aborted and only a fresh, reauthorized socket may retry.
 
 `SshTunnelSnapshot` provides a read-only point-in-time view of tunnel state for UI consumption (avoids coupling UI to the mutable service).
 

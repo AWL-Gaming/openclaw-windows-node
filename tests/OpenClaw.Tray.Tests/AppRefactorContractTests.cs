@@ -106,6 +106,278 @@ public sealed class AppRefactorContractTests
         Assert.Contains("private async Task<bool> VerifyAsync", coordinator);
         Assert.DoesNotContain("private async Task<bool> SafeProbeAsync", app);
         Assert.DoesNotContain("private async Task<bool> VerifyAsync", app);
+        Assert.Contains("WslKeepAlivePolicy.IsSameSetupManagedGateway(", startup);
+    }
+
+    [Fact]
+    public void GatewayRecordEdits_HoldSharedLifecycleLease()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var connectionPage = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Pages",
+            "ConnectionPage.xaml.cs"));
+        var statusWindow = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Windows",
+            "ConnectionStatusWindow.xaml.cs"));
+        var directConnectService = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Services",
+            "GatewayDirectConnectService.cs"));
+        var pageEdit = ExtractMethod(connectionPage, "DoDirectConnectFromAddFormAsync");
+        var windowEdit = ExtractMethod(statusWindow, "OnDirectConnectAsync");
+
+        Assert.Contains("_gatewayDirectConnectService.ConnectAsync(", pageEdit);
+        Assert.DoesNotContain("BeginManualGatewayLifecycleOperationAsync", pageEdit);
+        Assert.DoesNotContain("_gatewayRegistry.AddOrUpdate", pageEdit);
+        AssertInOrder(
+            directConnectService,
+            "BeginManualGatewayLifecycleOperationAsync",
+            "DisconnectAsync",
+            "_registry.AddOrUpdate(candidate)");
+        Assert.Contains("GatewayDirectConnectService", windowEdit);
+        Assert.Contains("directConnectService.ConnectAsync(", windowEdit);
+        Assert.DoesNotContain("BeginManualGatewayLifecycleOperationAsync", windowEdit);
+        Assert.DoesNotContain("_registry.AddOrUpdate", windowEdit);
+    }
+
+    [Fact]
+    public void SavedGatewaySwitch_LeavesActiveIdMutationToManager()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var connectionPage = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Pages",
+            "ConnectionPage.xaml.cs"));
+        var switchMethod = ExtractMethod(connectionPage, "OnConnectSavedGatewayAsync");
+
+        Assert.DoesNotContain("_gatewayRegistry.SetActive(gwId)", switchMethod);
+        AssertInOrder(
+            switchMethod,
+            "await _connectionManager.SwitchGatewayAsync(gwId)",
+            "LoadSavedGateways()",
+            "RefreshFromSnapshot(_lastSnapshot)");
+    }
+
+    [Fact]
+    public void CredentialReplacementFlows_DoNotBlindlyClearDeviceTokens()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var manager = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Connection",
+            "GatewayConnectionManager.cs"));
+        var statusWindow = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Windows",
+            "ConnectionStatusWindow.xaml.cs"));
+        var setupCode = ExtractMethod(manager, "ApplySetupCodeAsync");
+        var sharedToken = ExtractMethod(manager, "ConnectWithSharedTokenAsync");
+        var directConnect = ExtractMethod(statusWindow, "OnDirectConnectAsync");
+        var pageDirectConnect = ExtractMethod(
+            File.ReadAllText(Path.Combine(
+                root,
+                "src",
+                "OpenClaw.Tray.WinUI",
+                "Pages",
+                "ConnectionPage.xaml.cs")),
+            "DoDirectConnectFromAddFormAsync");
+        var directConnectService = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Services",
+            "GatewayDirectConnectService.cs"));
+        var capabilityHandlers = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "App.CapabilityHandlers.cs"));
+
+        Assert.DoesNotContain("ClearStoredTokens", setupCode);
+        Assert.DoesNotContain("ClearStoredTokens", sharedToken);
+        Assert.DoesNotContain("ClearStoredTokens", directConnect);
+        Assert.Contains("directConnectService.ConnectAsync(", directConnect);
+        Assert.Contains("PreserveExistingSharedTokenWhenMissing: true", directConnect);
+        Assert.Contains("isolatedValidationTunnel", sharedToken);
+        Assert.Contains("StartAsync(validationConfig", sharedToken);
+        Assert.Contains("ValidateSharedTokenBeforeReplacementAsync(", sharedToken);
+        Assert.Contains("_validationTunnelFactory()", sharedToken);
+        Assert.Contains("StopAndDisposeValidationTunnelAsync(isolatedValidationTunnel)", sharedToken);
+        Assert.DoesNotContain("ClearStoredTokens", pageDirectConnect);
+        Assert.DoesNotContain("BeginTransactionalTokenClear", pageDirectConnect);
+        Assert.Contains("BeginTransactionalTokenClear", directConnectService);
+        Assert.Contains(
+            "_gatewayDirectConnectService.SynchronizeSettingsWithCommittedGateway(record)",
+            capabilityHandlers);
+        Assert.DoesNotContain("if (result.GatewayCommitted)", capabilityHandlers);
+    }
+
+    [Fact]
+    public void StatusWindowDirectConnect_WaitsForManagerStateBeforeReportingConnected()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var statusWindow = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Windows",
+            "ConnectionStatusWindow.xaml.cs"));
+        var directConnect = ExtractMethod(statusWindow, "OnDirectConnectAsync");
+        var setupConnect = ExtractMethod(statusWindow, "OnConnectAsync");
+        var stateChanged = ExtractMethod(statusWindow, "OnManagerStateChanged");
+
+        Assert.Contains("ConnectionStatus_Connecting", directConnect);
+        Assert.Contains("ConnectionPage_ConnectedTo", directConnect);
+        Assert.Contains("ConnectionStatus_Applying", setupConnect);
+        Assert.DoesNotContain("ConnectionStatus_ConnectedTo", setupConnect);
+        Assert.DoesNotContain("SetupCodeOutcome.Success =>", setupConnect);
+        Assert.Contains("directConnectService.ConnectAsync(", directConnect);
+        Assert.Contains("GatewayDirectConnectOutcome.Failed", directConnect);
+        Assert.Contains("PreserveExistingSharedTokenWhenMissing: true", directConnect);
+        AssertInOrder(
+            directConnect,
+            "ConnectionStatus_Connecting",
+            "directConnectService.ConnectAsync(");
+        Assert.Contains("snapshot.OverallState == OverallConnectionState.Error", stateChanged);
+        Assert.Contains("snapshot.OperatorError", stateChanged);
+        Assert.Contains("SetupCodeResult.Text = errorText", stateChanged);
+        Assert.Contains("SetupCodeResult.Text = connectedText", stateChanged);
+        Assert.Contains("OverallConnectionState.Degraded", stateChanged);
+        Assert.Contains("HubWindow_Pill_Degraded", stateChanged);
+        Assert.Contains("OverallConnectionState.Connected or OverallConnectionState.Ready", stateChanged);
+        Assert.Contains("OverallConnectionState.Idle or OverallConnectionState.Disconnecting", stateChanged);
+        Assert.Contains("ConnectionStatus_Disconnected", stateChanged);
+        Assert.Contains("statusMessageGeneration", stateChanged);
+        Assert.Contains("Volatile.Read(ref _statusMessageGeneration)", stateChanged);
+        Assert.DoesNotContain("_registry.Save()", directConnect);
+        Assert.DoesNotContain("SaveOrThrow()", directConnect);
+        Assert.DoesNotContain("RollbackDirectConnectState(", statusWindow);
+    }
+
+    [Fact]
+    public void DirectConnectRollback_RestoresNullActiveGatewayExactly()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var directConnectService = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Services",
+            "GatewayDirectConnectService.cs"));
+        var rollback = ExtractMethod(directConnectService, "Rollback");
+
+        Assert.Contains("_registry.SetActive(previousActiveId);", rollback);
+        Assert.DoesNotContain("if (previousActiveId != null)", rollback);
+    }
+
+    [Fact]
+    public void DirectConnectRollback_UsesTransactionalTokenClearAfterLifecycleLease()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var connectionPage = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Pages",
+            "ConnectionPage.xaml.cs"));
+        var directConnect = ExtractMethod(connectionPage, "DoDirectConnectFromAddFormAsync");
+        var directConnectService = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Services",
+            "GatewayDirectConnectService.cs"));
+        var serviceConnect = ExtractMethod(directConnectService, "ConnectAsync");
+        var rollback = ExtractMethod(directConnectService, "Rollback");
+
+        Assert.Contains("_gatewayDirectConnectService.ConnectAsync(", directConnect);
+        Assert.DoesNotContain("_gatewayRegistry.AddOrUpdate", directConnect);
+        Assert.DoesNotContain("BeginTransactionalTokenClear", directConnect);
+        AssertInOrder(
+            serviceConnect,
+            "BeginManualGatewayLifecycleOperationAsync",
+            "var previousActiveId = _registry.ActiveGatewayId",
+            "await _connectionManager.DisconnectAsync()",
+            "BeginTransactionalTokenClear(identityDir, _logger)");
+        AssertInOrder(
+            serviceConnect,
+            "BeginTransactionalTokenClear(identityDir, _logger)",
+            "ConnectAndWaitForTerminalStateAsync(",
+            "await _connectionManager.DisconnectAsync()",
+            "Rollback(");
+        Assert.Contains("if (!clearResult.Success)", serviceConnect);
+        Assert.Contains("candidateRegistryCommitted", serviceConnect);
+        AssertInOrder(
+            serviceConnect,
+            "_registry.Save();",
+            "candidateRegistryCommitted = true",
+            "BeginTransactionalTokenClear(identityDir, _logger)");
+        AssertInOrder(
+            rollback,
+            "_registry.Save();",
+            "RestoreTransactionalTokenClear(");
+        Assert.Contains("RestoreTransactionalTokenClear(", rollback);
+        Assert.Contains("DeviceTokenRestoreOutcome.Superseded", rollback);
+        Assert.Contains("DeviceTokenRestoreOutcome.Failed", rollback);
+        Assert.Contains("ReconcileSettings(candidate)", rollback);
+        Assert.Contains("previousSettings.Restore(_settings)", rollback);
+        Assert.Contains("_reconcileRuntimeTunnel()", rollback);
+    }
+
+    [Fact]
+    public void DirectConnectTransaction_StaysOutOfConnectionPage()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var page = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Pages",
+            "ConnectionPage.xaml.cs"));
+        var app = ReadAppSources();
+        var service = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Services",
+            "GatewayDirectConnectService.cs"));
+        var pageMethod = ExtractMethod(page, "DoDirectConnectFromAddFormAsync");
+
+        Assert.Contains("new GatewayDirectConnectService(", app);
+        Assert.Contains("_gatewayDirectConnectService.ConnectAsync(", pageMethod);
+        Assert.DoesNotContain("BeginManualGatewayLifecycleOperationAsync", pageMethod);
+        Assert.DoesNotContain("_gatewayRegistry.AddOrUpdate", pageMethod);
+        Assert.DoesNotContain("_gatewayRegistry.SetActive", pageMethod);
+        Assert.DoesNotContain("BeginTransactionalTokenClear", pageMethod);
+        Assert.DoesNotContain("SaveOrThrow", pageMethod);
+        Assert.DoesNotContain("RollbackDirectConnect", page);
+        Assert.Contains("BeginManualGatewayLifecycleOperationAsync", service);
+        Assert.Contains("BeginTransactionalTokenClear", service);
+        Assert.Contains("RestoreTransactionalTokenClear", service);
+    }
+
+    [Fact]
+    public void BrowserAuthorization_RequiresExactOwnedSshListener()
+    {
+        var source = ReadAppSources();
+
+        Assert.Contains("uri.Port != browserForwardPort", source);
+        Assert.Contains("IsOwnedListenerReadyAsync(", source);
+        Assert.Contains("uri.Port,", source);
+        Assert.DoesNotContain("_sshTunnelService?.IsActive == true", source);
     }
 
     [Fact]
@@ -1353,7 +1625,7 @@ public sealed class AppRefactorContractTests
     {
         var match = Regex.Match(
             source,
-            $@"(?m)^\s*(?:private|protected|public|internal)\s+(?:static\s+)?(?:async\s+)?(?:Task(?:<[^>]+>)?|System\.Threading\.Tasks\.Task|void|bool|int|string\??|object\??|IntPtr|TrayMenuSnapshot|OpenClaw\.Connection\.GatewayCredential\?)\s+{Regex.Escape(methodName)}\s*\(");
+            $@"(?m)^\s*(?:private|protected|public|internal)\s+(?:static\s+)?(?:async\s+)?(?:Task(?:<[^>]+>)?|System\.Threading\.Tasks\.Task|void|bool|int|string\??|object\??|IntPtr|TrayMenuSnapshot|RollbackResult|OpenClaw\.Connection\.GatewayCredential\?)\s+{Regex.Escape(methodName)}\s*\(");
         Assert.True(match.Success, $"Could not find method {methodName}.");
 
         var brace = source.IndexOf('{', match.Index);

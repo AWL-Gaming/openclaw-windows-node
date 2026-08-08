@@ -72,6 +72,7 @@ public class TestWebSocketClient : WebSocketClientBase
     public string TestToken => _token;
     public IOpenClawLogger TestLogger => _logger;
     public Task TestReconnectWithBackoffAsync() => ReconnectWithBackoffAsync();
+    public void TestAbortCurrentWebSocket() => AbortCurrentWebSocket(CurrentConnectionGeneration);
 }
 
 [Collection("WebSocketClientBase")]
@@ -118,6 +119,34 @@ public class WebSocketClientBaseTests
 
         Assert.Equal(1, authorizationCalls);
         Assert.Equal(0, client.OnConnectedCallCount);
+    }
+
+    [Fact]
+    public async Task AbortCurrentWebSocket_PreventsLaterMessagesOnAcceptedSocket()
+    {
+        using var server = new LoopbackWebSocketServer();
+        await server.StartAsync();
+        using var client = new TestWebSocketClient(server.WebSocketUrl, "strong-token", _logger)
+        {
+            AutoReconnectEnabled = false,
+        };
+        await client.ConnectAsync();
+        await WaitForConditionAsync(
+            () => server.AcceptedCount == 1,
+            TimeSpan.FromSeconds(2));
+
+        client.TestAbortCurrentWebSocket();
+        try
+        {
+            await server.SendTextAsync("stale-socket-message");
+        }
+        catch (WebSocketException)
+        {
+            // The remote endpoint may observe the abort before attempting its send.
+        }
+        await Task.Delay(100);
+
+        Assert.DoesNotContain("stale-socket-message", client.ProcessedMessages);
     }
 
     [Fact]
@@ -564,6 +593,22 @@ internal sealed class LoopbackWebSocketServer : IDisposable
             {
                 return _acceptedSockets.Count;
             }
+        }
+    }
+
+    public async Task WaitForAcceptedCountAsync(int expectedCount, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (AcceptedCount < expectedCount)
+        {
+            if (DateTime.UtcNow >= deadline)
+            {
+                throw new TimeoutException(
+                    $"Loopback server accepted {AcceptedCount} connection(s); expected {expectedCount}.");
+            }
+
+            // slopwatch-ignore: SW004 This bounded poll synchronizes the test with the async server accept loop.
+            await Task.Delay(10);
         }
     }
 

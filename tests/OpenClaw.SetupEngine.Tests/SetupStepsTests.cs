@@ -132,6 +132,35 @@ public class SetupStepsTests : IDisposable
     }
 
     [Fact]
+    public void PairingAuthorization_GatesInitialAndReconnectHandshakesForOperatorAndNode()
+    {
+        var context = CreateContext(new SetupConfig
+        {
+            DistroName = "OpenClawGateway",
+            GatewayUrl = "ws://localhost:18789"
+        });
+        var operatorIdentityDir = Path.Combine(_tempDir, "operator-identity");
+        var nodeIdentityDir = Path.Combine(_tempDir, "node-identity");
+        const string gatewayUrl = "ws://localhost:18789";
+        using var operatorClient = new OpenClawGatewayClient(
+            gatewayUrl,
+            "synthetic-operator-token",
+            identityPath: operatorIdentityDir);
+        using var nodeClient = new WindowsNodeClient(
+            gatewayUrl,
+            "synthetic-node-token",
+            nodeIdentityDir);
+
+        PairOperatorStep.ApplyReconnectAuthorization(operatorClient, context);
+        PairOperatorStep.ApplyReconnectAuthorization(nodeClient, context);
+
+        Assert.NotNull(operatorClient.HandshakeAuthorizationAsync);
+        Assert.NotNull(operatorClient.ReconnectAuthorizationAsync);
+        Assert.NotNull(nodeClient.HandshakeAuthorizationAsync);
+        Assert.NotNull(nodeClient.ReconnectAuthorizationAsync);
+    }
+
+    [Fact]
     public async Task PairingEndpointTrust_RestartWait_RetriesSnapshotChangeOnly()
     {
         var context = CreateContext(new SetupConfig

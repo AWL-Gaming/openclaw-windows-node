@@ -352,7 +352,7 @@ jobs:
         include:
           - name: setup-connect
             timeout_minutes: 45
-            filter: "FullyQualifiedName~OpenClaw.E2ETests.Setup.SetupAndConnectTests|FullyQualifiedName~OpenClaw.E2ETests.Setup.MxcSetupAndConnectTests|FullyQualifiedName~OpenClaw.E2ETests.Setup.MirroredWslPortLeaseTests"
+            filter: "FullyQualifiedName~OpenClaw.E2ETests.Setup.SetupAndConnectTests|FullyQualifiedName~OpenClaw.E2ETests.Setup.MxcSetupAndConnectTests|FullyQualifiedName~OpenClaw.E2ETests.Setup.MirroredWslPortLeaseTests|FullyQualifiedName~OpenClaw.E2ETests.Setup.SshOwnershipAdversarialProofTests"
           - name: revocation-recovery
             timeout_minutes: 25
             filter: FullyQualifiedName~OpenClaw.E2ETests.Setup.RevocationAndRecoveryTests
@@ -449,6 +449,29 @@ jobs:
               Write-Error "MXC E2E proof '$mxcProofName' had unexpected outcome '$mxcOutcome'."
               exit 1
             }
+          }
+
+          $sshOwnershipProofNames = @(
+            "UnownedListenerIsRejectedThenOwnedTunnelRecoversWithoutRepairing",
+            "InitialHandshakeListenerReplacementWithholdsCredentialFrame",
+            "InitialNodeHandshakeListenerReplacementWithholdsCredentialFrame"
+          )
+          foreach ($sshOwnershipProofName in $sshOwnershipProofNames) {
+            $sshOwnershipProof = @(
+              $trx.TestRun.Results.UnitTestResult |
+                Where-Object { $_.testName -like "*$sshOwnershipProofName*" }
+            ) | Select-Object -First 1
+            if ($null -eq $sshOwnershipProof) {
+              Write-Error "E2E shard '${{ matrix.name }}' did not report the SSH ownership proof test '$sshOwnershipProofName'. Check the setup-connect filter before merging."
+              exit 1
+            }
+
+            $sshOwnershipOutcome = [string]$sshOwnershipProof.outcome
+            if ($sshOwnershipOutcome -ne "Passed") {
+              Write-Error "SSH ownership E2E proof '$sshOwnershipProofName' had outcome '$sshOwnershipOutcome'; this proof must pass and may not skip."
+              exit 1
+            }
+            Write-Host "SSH ownership E2E proof passed: $sshOwnershipProofName"
           }
         }
 
