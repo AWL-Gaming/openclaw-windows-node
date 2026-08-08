@@ -340,7 +340,7 @@ public class WindowsNodeClient : WebSocketClientBase
                 await HandlePairingResolvedEventAsync(root, eventType);
                 break;
             case "node.invoke.request":
-                await HandleNodeInvokeEventAsync(root);
+                await StartNodeInvokeEventAsync(root.Clone());
                 break;
             case "node.invoke.cancel":
                 await HandleNodeInvokeCancelAsync(root, "payload", responseId: null);
@@ -444,7 +444,7 @@ public class WindowsNodeClient : WebSocketClientBase
         }
     }
     
-    private async Task HandleNodeInvokeEventAsync(JsonElement root)
+    private async Task StartNodeInvokeEventAsync(JsonElement root)
     {
         var telemetry = new NodeToolInvocation(NodeToolTransport.Gateway);
         _logger.Info("[NODE] Received node.invoke.request event");
@@ -530,7 +530,7 @@ public class WindowsNodeClient : WebSocketClientBase
             }
         }
 
-        var sessionKey = ExtractNodeInvokeSessionKey(payload, args);
+        var sessionKey = ExtractGatewayNodeInvokeSessionKey(payload);
         
         _logger.Info($"[NODE] Invoking command: {command}");
         
@@ -1262,8 +1262,6 @@ public class WindowsNodeClient : WebSocketClientBase
         var args = paramsEl.TryGetProperty("args", out var argsEl) 
             ? argsEl.Clone() 
             : default;
-        var sessionKey = ExtractNodeInvokeSessionKey(paramsEl, args);
-        
         _logger.Info($"Received node.invoke: {command}");
         
         var request = new NodeInvokeRequest
@@ -1271,7 +1269,7 @@ public class WindowsNodeClient : WebSocketClientBase
             Id = requestId,
             Command = command,
             Args = args,
-            SessionKey = sessionKey,
+            SessionKey = ExtractGatewayNodeInvokeSessionKey(paramsEl),
             Telemetry = telemetry
         };
         
@@ -1648,25 +1646,19 @@ public class WindowsNodeClient : WebSocketClientBase
         return false;
     }
 
-    private static string? ExtractNodeInvokeSessionKey(JsonElement envelope, JsonElement args)
+    private static string? ExtractGatewayNodeInvokeSessionKey(JsonElement envelope)
     {
-        if (envelope.TryGetProperty("sessionKey", out var envelopeSessionKey) &&
-            envelopeSessionKey.ValueKind == JsonValueKind.String)
+        if (envelope.TryGetProperty("sessionKey", out var envelopeSessionKey))
         {
-            var sessionKey = envelopeSessionKey.GetString();
-            if (!string.IsNullOrWhiteSpace(sessionKey))
-                return sessionKey;
-        }
+            if (envelopeSessionKey.ValueKind == JsonValueKind.String)
+            {
+                var sessionKey = envelopeSessionKey.GetString();
+                if (!string.IsNullOrWhiteSpace(sessionKey))
+                    return sessionKey;
+            }
 
-        if (args.ValueKind == JsonValueKind.Object &&
-            args.TryGetProperty("sessionKey", out var argsSessionKey) &&
-            argsSessionKey.ValueKind == JsonValueKind.String)
-        {
-            var sessionKey = argsSessionKey.GetString();
-            if (!string.IsNullOrWhiteSpace(sessionKey))
-                return sessionKey;
+            return null;
         }
-
         return null;
     }
 

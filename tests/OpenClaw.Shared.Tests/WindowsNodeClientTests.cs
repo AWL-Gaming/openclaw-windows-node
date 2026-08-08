@@ -465,6 +465,42 @@ public class WindowsNodeClientTests
         }
     }
 
+    [Fact]
+    public void HandleResponse_HelloOk_DoesNotPublishUnsupportedProtocolFeatureRequest()
+    {
+        var dataPath = Path.Combine(Path.GetTempPath(), $"openclaw-node-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataPath);
+
+        try
+        {
+            using var client = new CapturingWindowsNodeClient(
+                "ws://localhost:18789",
+                "test-token",
+                dataPath);
+            using var document = JsonDocument.Parse(
+                """
+                {
+                  "type": "res",
+                  "ok": true,
+                  "payload": {
+                    "type": "hello-ok",
+                    "nodeId": "test-node-id"
+                  }
+                }
+                """);
+
+            HandleCorrelatedHelloOk(client, document.RootElement);
+
+            Assert.DoesNotContain(
+                client.SentMessages,
+                message => message.Contains("node.protocolFeatures", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(dataPath, true);
+        }
+    }
+
     /// <summary>
     /// When hello-ok has no token and no stored token, fires exactly one Pending event.
     /// </summary>
@@ -2237,7 +2273,7 @@ public class WindowsNodeClientTests
     }
 
     [Fact]
-    public async Task CommandDispatch_ReqPath_PropagatesParamsSessionKey()
+    public async Task CommandDispatch_ReqPath_UsesEnvelopeSessionKey()
     {
         var dataPath = Path.Combine(Path.GetTempPath(), $"openclaw-node-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dataPath);
@@ -2275,7 +2311,7 @@ public class WindowsNodeClientTests
     }
 
     [Fact]
-    public async Task CommandDispatch_ReqPath_PropagatesArgsSessionKey()
+    public async Task CommandDispatch_ReqPath_DoesNotTrustArgsSessionKey()
     {
         var dataPath = Path.Combine(Path.GetTempPath(), $"openclaw-node-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dataPath);
@@ -2304,7 +2340,7 @@ public class WindowsNodeClientTests
             await InvokeProcessMessageAsync(client, json);
             await cap.ExecutedTask.WaitAsync(TimeSpan.FromSeconds(5));
 
-            Assert.Equal("chat-thread-from-args", cap.LastRequest?.SessionKey);
+            Assert.Null(cap.LastRequest?.SessionKey);
         }
         finally
         {
@@ -2314,7 +2350,7 @@ public class WindowsNodeClientTests
     }
 
     [Fact]
-    public async Task CommandDispatch_ReqPath_ParamsSessionKeyOverridesArgsSessionKey()
+    public async Task CommandDispatch_ReqPath_EnvelopeSessionKeyOverridesArgs()
     {
         var dataPath = Path.Combine(Path.GetTempPath(), $"openclaw-node-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dataPath);
@@ -2464,6 +2500,162 @@ public class WindowsNodeClientTests
 
             Assert.Equal(1, cap.ExecuteCount);
             Assert.Equal("mock.ping", cap.LastCommand);
+        }
+        finally
+        {
+            if (Directory.Exists(dataPath))
+                Directory.Delete(dataPath, true);
+        }
+    }
+
+    [Fact]
+    public async Task CommandDispatch_EventPath_UsesEnvelopeSessionKey()
+    {
+        var dataPath = Path.Combine(Path.GetTempPath(), $"openclaw-node-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataPath);
+
+        try
+        {
+            using var client = new WindowsNodeClient("ws://localhost:18789", "test-token", dataPath);
+            var cap = new MockCapability("mock", "mock.ping");
+            client.RegisterCapability(cap);
+
+            await InvokeProcessMessageAsync(client, """
+                {
+                  "type": "event",
+                  "event": "node.invoke.request",
+                  "payload": {
+                    "requestId": "inv-event-session",
+                    "command": "mock.ping",
+                    "sessionKey": "gateway-session",
+                    "args": {
+                      "sessionKey": "spoofed-session"
+                    }
+                  }
+                }
+                """);
+            await cap.ExecutedTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Equal("gateway-session", cap.LastRequest?.SessionKey);
+        }
+        finally
+        {
+            if (Directory.Exists(dataPath))
+                Directory.Delete(dataPath, true);
+        }
+    }
+
+    [Fact]
+    public async Task CommandDispatch_EventPath_ExplicitNullEnvelopeClearsArgsSessionKey()
+    {
+        var dataPath = Path.Combine(Path.GetTempPath(), $"openclaw-node-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataPath);
+
+        try
+        {
+            using var client = new WindowsNodeClient("ws://localhost:18789", "test-token", dataPath);
+            var cap = new MockCapability("mock", "mock.ping");
+            client.RegisterCapability(cap);
+
+            await InvokeProcessMessageAsync(client, """
+                {
+                  "type": "event",
+                  "event": "node.invoke.request",
+                  "payload": {
+                    "requestId": "inv-event-args-session",
+                    "command": "mock.ping",
+                    "sessionKey": null,
+                    "args": {
+                      "sessionKey": "spoofed-session"
+                    }
+                  }
+                }
+                """);
+            await cap.ExecutedTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Null(cap.LastRequest?.SessionKey);
+        }
+        finally
+        {
+            if (Directory.Exists(dataPath))
+                Directory.Delete(dataPath, true);
+        }
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("{}")]
+    [InlineData("123")]
+    [InlineData("true")]
+    public async Task CommandDispatch_EventPath_MalformedEnvelopeDoesNotTrustNestedSessionKey(
+        string malformedSessionKey)
+    {
+        var dataPath = Path.Combine(Path.GetTempPath(), $"openclaw-node-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataPath);
+
+        try
+        {
+            using var client = new WindowsNodeClient("ws://localhost:18789", "test-token", dataPath);
+            var cap = new MockCapability("mock", "mock.ping");
+            client.RegisterCapability(cap);
+
+            await InvokeProcessMessageAsync(
+                client,
+                $$"""
+                {
+                  "type": "event",
+                  "event": "node.invoke.request",
+                  "payload": {
+                    "requestId": "inv-event-malformed-session",
+                    "command": "mock.ping",
+                    "sessionKey": {{malformedSessionKey}},
+                    "args": {
+                      "sessionKey": "forged-session"
+                    }
+                  }
+                }
+                """);
+            await cap.ExecutedTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Null(cap.LastRequest?.SessionKey);
+        }
+        finally
+        {
+            if (Directory.Exists(dataPath))
+                Directory.Delete(dataPath, true);
+        }
+    }
+
+    [Fact]
+    public async Task CommandDispatch_EventPath_OmittedEnvelopeDoesNotTrustNestedSessionKey()
+    {
+        var dataPath = Path.Combine(Path.GetTempPath(), $"openclaw-node-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataPath);
+
+        try
+        {
+            using var client = new CapturingWindowsNodeClient(
+                "ws://localhost:18789",
+                "test-token",
+                dataPath);
+            var cap = new MockCapability("mock", "mock.ping");
+            client.RegisterCapability(cap);
+
+            await InvokeProcessMessageAsync(client, """
+                {
+                  "type": "event",
+                  "event": "node.invoke.request",
+                  "payload": {
+                    "requestId": "inv-event-unattributed",
+                    "command": "mock.ping",
+                    "args": {
+                      "sessionKey": "forged-session"
+                    }
+                  }
+                }
+                """);
+            await cap.ExecutedTask.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Null(cap.LastRequest?.SessionKey);
         }
         finally
         {
