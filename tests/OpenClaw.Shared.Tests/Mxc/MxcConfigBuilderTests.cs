@@ -668,6 +668,38 @@ public class MxcConfigBuilderTests
         Assert.Equal("container", config.ProcessContainer!.Ui!.Isolation);
     }
 
+
+    [Fact]
+    public void GetWxcCommandOverride_DirectArgv_PreservesExactArguments()
+    {
+        string[] argv =
+        [
+            @"C:\Windows\System32\cscript.exe",
+            "//nologo",
+            @"C:\work\argv.js",
+            "a+b \"quoted\" A+/=Z",
+            "slashes\\before\"quote",
+            "",
+        ];
+        using var argsDoc = JsonDocument.Parse(JsonSerializer.Serialize(new { argv }));
+        var request = RequestFor(BalancedPolicy()) with { Args = argsDoc.RootElement.Clone() };
+
+        var commandOverride = MxcConfigBuilder.GetWxcCommandOverride(request);
+
+        Assert.NotNull(commandOverride);
+        Assert.Equal(argv, commandOverride);
+    }
+
+    [Fact]
+    public void GetWxcCommandOverride_CanonicalCmdWrapper_StaysOnSynthesizedCommandLine()
+    {
+        string[] argv = [ExpectedSystemCmdExe(), "/d", "/s", "/c", "echo hi"];
+        using var argsDoc = JsonDocument.Parse(JsonSerializer.Serialize(new { argv }));
+        var request = RequestFor(BalancedPolicy()) with { Args = argsDoc.RootElement.Clone() };
+
+        Assert.Null(MxcConfigBuilder.GetWxcCommandOverride(request));
+    }
+
     [Fact]
     public void DirectArgvCommandLine_RoundTripsExactlyThroughCommandLineToArgvW()
     {

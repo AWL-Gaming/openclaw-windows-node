@@ -38,7 +38,8 @@ public sealed class MxcExecutor
         MxcConfig config,
         CancellationToken ct = default,
         bool experimental = false,
-        string? workingDirectory = null)
+        string? workingDirectory = null,
+        IReadOnlyList<string>? commandOverride = null)
     {
         var json = JsonSerializer.Serialize(config, s_jsonOptions);
         var base64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
@@ -46,6 +47,7 @@ public sealed class MxcExecutor
         if (experimental) args.Add("--experimental");
         args.Add("--config-base64");
         args.Add(base64);
+        AppendCommandOverride(args, commandOverride);
         return await RunWithArgumentsAsync(args, ct, workingDirectory);
     }
 
@@ -58,7 +60,8 @@ public sealed class MxcExecutor
         string configFilePath,
         CancellationToken ct = default,
         bool experimental = false,
-        string? workingDirectory = null)
+        string? workingDirectory = null,
+        IReadOnlyList<string>? commandOverride = null)
     {
         if (string.IsNullOrEmpty(configFilePath)) throw new ArgumentException("configFilePath required", nameof(configFilePath));
         // Reject embedded quotes to avoid any argv-parsing ambiguity. NTFS allows
@@ -70,7 +73,32 @@ public sealed class MxcExecutor
         if (experimental) args.Add("--experimental");
         args.Add("--config");
         args.Add(configFilePath);
+        AppendCommandOverride(args, commandOverride);
         return RunWithArgumentsAsync(args, ct, workingDirectory);
+    }
+
+    private static void AppendCommandOverride(
+        List<string> arguments,
+        IReadOnlyList<string>? commandOverride)
+    {
+        if (commandOverride is null)
+            return;
+        if (commandOverride.Count == 0)
+            throw new ArgumentException("commandOverride requires an executable.", nameof(commandOverride));
+
+        // wxc-exec 0.7+ accepts trailing command argv after "--" and documents it
+        // as overriding process.commandLine. Each value still goes through
+        // ProcessStartInfo.ArgumentList below, so no intermediary string parser can
+        // strip embedded quotes or alter backslashes.
+        arguments.Add("--");
+        foreach (var argument in commandOverride)
+        {
+            if (argument is null)
+                throw new ArgumentException("commandOverride entries cannot be null.", nameof(commandOverride));
+            if (argument.Contains('\0'))
+                throw new ArgumentException("commandOverride entries cannot contain NUL.", nameof(commandOverride));
+            arguments.Add(argument);
+        }
     }
 
     private async Task<MxcResult> RunWithArgumentsAsync(

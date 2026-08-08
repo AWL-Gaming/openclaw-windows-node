@@ -869,6 +869,98 @@ public class McpToolBridgeTests
     }
 
     [Fact]
+    public async Task ToolsList_SystemRun_AdvertisesCanonicalArgvSchema()
+    {
+        var caps = new List<INodeCapability>
+        {
+            new SystemCapability(OpenClaw.Shared.NullLogger.Instance),
+        };
+        var bridge = CreateBridge(caps);
+        var resp = await bridge.HandleRequestAsync(
+            @"{""jsonrpc"":""2.0"",""id"":1,""method"":""tools/list""}");
+
+        using var doc = JsonDocument.Parse(resp!);
+        var tools = doc.RootElement.GetProperty("result").GetProperty("tools");
+
+        foreach (var toolName in new[] { "system.run", "system.run.prepare" })
+        {
+            var tool = tools.EnumerateArray()
+                .Single(t => t.GetProperty("name").GetString() == toolName);
+            var schema = tool.GetProperty("inputSchema");
+            Assert.Equal(JsonValueKind.Array, schema.GetProperty("required").ValueKind);
+            Assert.Contains(
+                schema.GetProperty("required").EnumerateArray().Select(v => v.GetString()),
+                value => value == "command");
+            Assert.False(schema.GetProperty("additionalProperties").GetBoolean());
+
+            var properties = schema.GetProperty("properties");
+            var command = properties.GetProperty("command");
+            Assert.Equal("array", command.GetProperty("type").GetString());
+            Assert.Equal(1, command.GetProperty("minItems").GetInt32());
+            Assert.Equal("string", command.GetProperty("items").GetProperty("type").GetString());
+            Assert.True(properties.TryGetProperty("rawCommand", out _));
+            Assert.True(properties.TryGetProperty("cwd", out _));
+            Assert.True(properties.TryGetProperty("timeoutMs", out _));
+            Assert.False(properties.TryGetProperty("args", out _));
+            Assert.False(properties.TryGetProperty("shell", out _));
+            Assert.False(properties.TryGetProperty("env", out _));
+        }
+    }
+
+    [Fact]
+    public async Task ToolsCall_SystemRunPrepare_PreservesCanonicalArgvExactly()
+    {
+        var cap = new SystemCapability(OpenClaw.Shared.NullLogger.Instance);
+        var bridge = CreateBridge(new List<INodeCapability> { cap });
+        var argv = new[]
+        {
+            @"C:\Program Files\AWL Tools\probe.exe",
+            "",
+            "with \"quotes\"",
+            "a && b || c",
+            "  leading and trailing  ",
+            "line1\nline2",
+            "café-日本語",
+            "trailing\\",
+        };
+
+        var request = JsonSerializer.Serialize(new
+        {
+            jsonrpc = "2.0",
+            id = 1,
+            method = "tools/call",
+            @params = new
+            {
+                name = "system.run.prepare",
+                arguments = new
+                {
+                    command = argv,
+                    rawCommand = "display metadata only",
+                    cwd = @"C:\Program Files\AWL Work",
+                    timeoutMs = 5000,
+                },
+            },
+        });
+
+        var response = await bridge.HandleRequestAsync(request);
+        using var envelope = JsonDocument.Parse(response!);
+        var result = envelope.RootElement.GetProperty("result");
+        Assert.False(result.GetProperty("isError").GetBoolean());
+
+        using var payload = JsonDocument.Parse(
+            result.GetProperty("content")[0].GetProperty("text").GetString()!);
+        var plan = payload.RootElement.GetProperty("plan");
+        var actualArgv = plan.GetProperty("argv")
+            .EnumerateArray()
+            .Select(value => value.GetString()!)
+            .ToArray();
+
+        Assert.Equal(argv, actualArgv);
+        Assert.Equal(@"C:\Program Files\AWL Work", plan.GetProperty("cwd").GetString());
+        Assert.Equal("display metadata only", plan.GetProperty("rawCommand").GetString());
+    }
+
+    [Fact]
     public async Task ToolsList_SystemRun_Absent_WhenSystemCapabilityExcludesRunCommands()
     {
         // "Run system tools" toggle off: NodeService constructs

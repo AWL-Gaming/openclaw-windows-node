@@ -82,6 +82,7 @@ public sealed class DirectAppContainerExecutor : ISandboxExecutor
         try
         {
             var config = MxcConfigBuilder.Build(request, scratchDir);
+            var commandOverride = MxcConfigBuilder.GetWxcCommandOverride(request);
             var configJson = JsonSerializer.Serialize(config, ConfigJson);
             var launchWorkingDirectory = string.IsNullOrWhiteSpace(config.Process.Cwd)
                 ? null
@@ -116,17 +117,40 @@ public sealed class DirectAppContainerExecutor : ISandboxExecutor
             // Base64 cmdline grows ~4/3 vs the underlying JSON bytes. Count
             // UTF-8 bytes (not chars) because non-ASCII text would otherwise
             // under-estimate the encoded size and overflow the cmdline limit.
+            //
+            // Direct argv is also passed after wxc-exec's "--" command override so
+            // embedded quotes never traverse MXC's process.commandLine parser. Count
+            // that exact Win32 serialization against the same conservative launch
+            // limit. If config + override would be too large, switch the config to a
+            // file so the native argv keeps the available command-line headroom.
             var configByteCount = Encoding.UTF8.GetByteCount(configJson);
             var base64Len = ((configByteCount + 2) / 3) * 4;
-            if (base64Len <= Base64ConfigCharLimit)
+            var commandOverrideLen = commandOverride is null
+                ? 0
+                : DirectArgvCommandLine.Build(commandOverride).Length + 4;
+            if (commandOverrideLen > Base64ConfigCharLimit)
             {
-                result = await executor.RunAsync(config, linked.Token, workingDirectory: launchWorkingDirectory);
+                throw new NotSupportedException(
+                    "Direct argv is too large for the exact MXC command override.");
+            }
+
+            if (base64Len + commandOverrideLen <= Base64ConfigCharLimit)
+            {
+                result = await executor.RunAsync(
+                    config,
+                    linked.Token,
+                    workingDirectory: launchWorkingDirectory,
+                    commandOverride: commandOverride);
             }
             else
             {
                 tempConfigFile = Path.Combine(scratchDir, "wxc-config.json");
                 await File.WriteAllTextAsync(tempConfigFile, configJson, Encoding.UTF8, linked.Token);
-                result = await executor.RunWithConfigFileAsync(tempConfigFile, linked.Token, workingDirectory: launchWorkingDirectory);
+                result = await executor.RunWithConfigFileAsync(
+                    tempConfigFile,
+                    linked.Token,
+                    workingDirectory: launchWorkingDirectory,
+                    commandOverride: commandOverride);
             }
 
             sw.Stop();

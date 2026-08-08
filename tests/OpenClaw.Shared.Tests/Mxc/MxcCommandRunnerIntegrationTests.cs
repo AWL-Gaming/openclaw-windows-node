@@ -124,7 +124,65 @@ public class MxcCommandRunnerIntegrationTests
             $"ExitCode={result.ExitCode}\nStdout={result.Stdout}\nStderr={result.Stderr}\nTimedOut={result.TimedOut}\nDurationMs={result.DurationMs}");
     }
 
+
     [IntegrationFact]
+    public async Task SystemRun_DirectArgv_PreservesEmbeddedQuotesInsideAppContainer()
+    {
+        var root = Directory.CreateDirectory(Path.Combine(
+            AppContext.BaseDirectory,
+            "openclaw-mxc-argv-roundtrip-" + Guid.NewGuid().ToString("N"))).FullName;
+        var scriptPath = Path.Combine(root, "argv.js");
+        const string script = """
+var value = WScript.Arguments(0);
+WScript.Echo("VALUE=" + value);
+WScript.Echo("LEN=" + value.length);
+var codes = [];
+for (var i = 0; i < value.length; i++) codes.push(value.charCodeAt(i));
+WScript.Echo("CODES=" + codes.join(","));
+""";
+        await File.WriteAllTextAsync(scriptPath, script);
+
+        try
+        {
+            var runner = TryBuildRunner(configure: settings =>
+            {
+                settings.SandboxCustomFolders = new List<SandboxCustomFolder>
+                {
+                    new() { Path = root, Access = SandboxFolderAccess.ReadOnly },
+                };
+            });
+            if (runner is null) return;
+
+            const string payload = "a+b \"quoted\" A+/=Z";
+            var result = await runner.RunAsync(new CommandRequest
+            {
+                Argv =
+                [
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cscript.exe"),
+                    "//nologo",
+                    scriptPath,
+                    payload,
+                ],
+                TimeoutMs = 30_000,
+            });
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"ExitCode={result.ExitCode}\nStdout={result.Stdout}\nStderr={result.Stderr}\nTimedOut={result.TimedOut}\nDurationMs={result.DurationMs}");
+            Assert.Contains("VALUE=" + payload, result.Stdout, StringComparison.Ordinal);
+            Assert.Contains("LEN=" + payload.Length, result.Stdout, StringComparison.Ordinal);
+            Assert.Contains(
+                "CODES=" + string.Join(",", payload.Select(ch => (int)ch)),
+                result.Stdout,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+ [IntegrationFact]
     public async Task SystemRun_PipelineSmokeTest_WithDenyPaths_ReturnsResult()
     {
         // NOTE: This is a SMOKE TEST, not a deny-paths assertion. The actual

@@ -523,6 +523,25 @@ public static class MxcConfigBuilder
     }
 
     /// <summary>
+    /// Returns the exact direct argv that can be passed through wxc-exec's native
+    /// command override. Canonical cmd.exe command-mode wrappers intentionally stay
+    /// on the synthesized process.commandLine path because that wrapper carries the
+    /// MXC PATH/TEMP bootstrap required by cmd.exe /C.
+    /// </summary>
+    internal static IReadOnlyList<string>? GetWxcCommandOverride(SandboxExecutionRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var args = ParseSystemRunArgs(request.Args);
+        if (args.DirectArgv is null || args.DirectArgv.Count == 0)
+            return null;
+
+        if (IsCmdExecutable(args.DirectArgv[0]) && SelectsCmdCommandMode(args.DirectArgv))
+            return null;
+
+        return args.DirectArgv;
+    }
+
+    /// <summary>
     /// Capability args envelope for system.run. Other capability shapes can add
     /// their own parser here as they're rehosted.
     /// </summary>

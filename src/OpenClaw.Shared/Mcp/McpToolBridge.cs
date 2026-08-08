@@ -256,16 +256,50 @@ public class McpToolBridge
                     description = CommandDescriptions.TryGetValue(cmd, out var desc)
                         ? desc
                         : $"{cap.Category} capability: {cmd}",
-                    inputSchema = new
-                    {
-                        type = "object",
-                        additionalProperties = true,
-                        properties = new { },
-                    },
+                    inputSchema = BuildInputSchema(cmd),
                 });
             }
         }
         return new { tools };
+    }
+
+    private static object BuildInputSchema(string command)
+    {
+        if (command is "system.run" or "system.run.prepare")
+        {
+            return new
+            {
+                type = "object",
+                required = new[] { "command" },
+                additionalProperties = false,
+                properties = new
+                {
+                    command = new
+                    {
+                        type = "array",
+                        minItems = 1,
+                        items = new { type = "string" },
+                        description = "Canonical process argv. Element 0 is the executable or explicit shell wrapper; later elements are passed verbatim."
+                    },
+                    rawCommand = new
+                    {
+                        type = "string",
+                        description = "Optional display-only metadata. Never used as executable input."
+                    },
+                    cwd = new { type = "string" },
+                    timeoutMs = new { type = "integer", minimum = 1 },
+                    agentId = new { type = "string" },
+                    sessionKey = new { type = "string" },
+                },
+            };
+        }
+
+        return new
+        {
+            type = "object",
+            additionalProperties = true,
+            properties = new { },
+        };
     }
 
     /// <summary>
