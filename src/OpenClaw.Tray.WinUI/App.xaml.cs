@@ -2286,6 +2286,13 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
                                     cancellationToken)
                                 .ConfigureAwait(false);
                     }
+                    if (record.BrowserControlPort is int explicitBrowserControlPort &&
+                        explicitBrowserControlPort == uri.Port &&
+                        WindowsTcpListenerSnapshot.IsLoopbackListenerOwnedByCurrentUser(uri.Port))
+                    {
+                        return true;
+                    }
+
                     if (_managedLocalPortProvenance is null ||
                         GatewayRecordEditing.ResolveManagedDistroName(record) is null)
                     {
