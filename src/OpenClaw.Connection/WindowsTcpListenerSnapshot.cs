@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
+using System.Linq;
 using System.Runtime.InteropServices;
 
 namespace OpenClaw.Connection;
@@ -33,6 +34,31 @@ public static class WindowsTcpListenerSnapshot
         return new(result, ipv4Complete, ipv6Complete);
     }
 
+    /// <summary>
+    /// Returns true only when an IPv4 loopback listener exists on <paramref name="port"/>
+    /// and the owning process can be proven to run as the current Windows user.
+    /// Incomplete listener snapshots and ownership lookup failures are denied.
+    /// </summary>
+    public static bool IsLoopbackListenerOwnedByCurrentUser(int port) =>
+        IsLoopbackListenerOwnedByCurrentUser(
+            Capture(),
+            port,
+            WindowsProcessOwnership.IsOwnedByCurrentUser);
+
+    internal static bool IsLoopbackListenerOwnedByCurrentUser(
+        WindowsTcpListenerSnapshotResult snapshot,
+        int port,
+        Func<int, bool> isOwnedByCurrentUser)
+    {
+        if (port is < 1 or > 65535 || !snapshot.Ipv4Complete)
+            return false;
+
+        return snapshot.Listeners.Any(listener =>
+            listener.Port == port &&
+            listener.ProcessId > 0 &&
+            IPAddress.Loopback.Equals(listener.Address) &&
+            isOwnedByCurrentUser(listener.ProcessId));
+    }
     public static string? GetProcessCommandLine(int processId)
     {
         if (processId <= 0)
