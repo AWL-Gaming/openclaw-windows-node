@@ -812,9 +812,25 @@ public sealed class HostCapability : NodeCapabilityBase
         cts.CancelAfter(timeoutMs);
         using var request = new HttpRequestMessage(new HttpMethod(method), uri);
 
+        var hasExplicitAuthorization = false;
         if (args.TryGetProperty("headers", out var headers) && headers.ValueKind == JsonValueKind.Object)
+        {
             foreach (var item in headers.EnumerateObject())
+            {
+                if (string.Equals(item.Name, "Authorization", StringComparison.OrdinalIgnoreCase))
+                    hasExplicitAuthorization = true;
                 request.Headers.TryAddWithoutValidation(item.Name, item.Value.GetString() ?? item.Value.ToString());
+            }
+        }
+
+        if (ShouldAutoAuthorizeLocalMcp(uri, mcpMode, hasExplicitAuthorization, ResolveLocalMcpPort()))
+        {
+            var tokenPath = OpenClawAppIdentity.ResolveMcpTokenPath(Environment.GetEnvironmentVariable);
+            var token = OpenClaw.Shared.Mcp.McpAuthToken.TryLoad(tokenPath);
+            if (string.IsNullOrWhiteSpace(token))
+                return Error("Local MCP bearer token is unavailable; ensure the local MCP server is enabled and its token file exists");
+            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+        }
 
         if (mcpMode)
         {
@@ -858,6 +874,26 @@ public sealed class HostCapability : NodeCapabilityBase
             text,
             json = parsed
         });
+    }
+
+    internal static bool ShouldAutoAuthorizeLocalMcp(
+        Uri uri,
+        bool mcpMode,
+        bool hasExplicitAuthorization,
+        int localMcpPort)
+    {
+        return mcpMode
+            && !hasExplicitAuthorization
+            && uri.IsLoopback
+            && uri.Port == localMcpPort;
+    }
+
+    private static int ResolveLocalMcpPort()
+    {
+        return int.TryParse(Environment.GetEnvironmentVariable("OPENCLAW_MCP_PORT"), out var configuredPort)
+            && configuredPort is > 0 and <= 65535
+                ? configuredPort
+                : 8765;
     }
 
     private NodeInvokeResponse WindowList(JsonElement args)

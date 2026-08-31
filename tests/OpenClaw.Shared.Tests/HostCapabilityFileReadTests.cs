@@ -144,6 +144,52 @@ public sealed class HostCapabilityFileReadTests
         Assert.Contains("unsupported file.read argument", unknown.Error, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void McpRequest_AutoAuth_IsLimitedToConfiguredLoopbackPort()
+    {
+        Assert.True(HostCapability.ShouldAutoAuthorizeLocalMcp(
+            new Uri("http://127.0.0.1:8765/"),
+            mcpMode: true,
+            hasExplicitAuthorization: false,
+            localMcpPort: 8765));
+
+        Assert.True(HostCapability.ShouldAutoAuthorizeLocalMcp(
+            new Uri("http://[::1]:8765/"),
+            mcpMode: true,
+            hasExplicitAuthorization: false,
+            localMcpPort: 8765));
+
+        Assert.False(HostCapability.ShouldAutoAuthorizeLocalMcp(
+            new Uri("http://127.0.0.1:18791/"),
+            mcpMode: true,
+            hasExplicitAuthorization: false,
+            localMcpPort: 8765));
+
+        Assert.False(HostCapability.ShouldAutoAuthorizeLocalMcp(
+            new Uri("https://example.com:8765/"),
+            mcpMode: true,
+            hasExplicitAuthorization: false,
+            localMcpPort: 8765));
+    }
+
+    [Fact]
+    public void McpRequest_AutoAuth_PreservesExplicitAuthorizationAndHttpMode()
+    {
+        var localMcp = new Uri("http://127.0.0.1:8765/");
+
+        Assert.False(HostCapability.ShouldAutoAuthorizeLocalMcp(
+            localMcp,
+            mcpMode: true,
+            hasExplicitAuthorization: true,
+            localMcpPort: 8765));
+
+        Assert.False(HostCapability.ShouldAutoAuthorizeLocalMcp(
+            localMcp,
+            mcpMode: false,
+            hasExplicitAuthorization: false,
+            localMcpPort: 8765));
+    }
+
     private static NodeInvokeRequest Request(string path, int? maxBytes = null)
     {
         var args = maxBytes.HasValue
