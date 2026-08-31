@@ -17,6 +17,16 @@
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
   </PropertyGroup>
 
+  <!-- AWL MCP desktop helper identity. This is an unpackaged, invisible Session 1
+       capability host built from the AWL-maintained fork; keep RootNamespace unchanged
+       so the existing WinUI/XAML resource namespace remains compatible. -->
+  <PropertyGroup Condition="'$(AwlMcpDesktopBuild)' == 'true'">
+    <AssemblyName>AWL.McpDesktop</AssemblyName>
+    <AssemblyTitle>AWL MCP Desktop</AssemblyTitle>
+    <FileDescription>AWL MCP Desktop</FileDescription>
+    <Product>AWL MCP Desktop</Product>
+  </PropertyGroup>
+
   <!-- Dev build identity: allows side-by-side installation with Release.
        Set DevBuild=true explicitly; release identity remains the default for every configuration. -->
   <PropertyGroup Condition="'$(DevBuild)' == 'true'">
