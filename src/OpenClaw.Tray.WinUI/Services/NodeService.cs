@@ -328,6 +328,13 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
 
         Register(_systemCapability);
 
+        // Structured private-fabric host operations. This remains a two-command
+        // facade (host.describe/host.invoke) so backend operations can grow
+        // without forcing MCP/ChatGPT schema churn.
+        var hostCapability = new HostCapability(_logger);
+        hostCapability.WindowCaptureRequested += OnHostWindowCapture;
+        Register(hostCapability);
+
         if (NodeCapabilityGating.ShouldRegisterCanvas(_settings))
         {
             _canvasCapability = new CanvasCapability(_logger);
@@ -1867,6 +1874,15 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
                 appNotification));
     }
     
+    private Task<WindowCaptureResult> OnHostWindowCapture(
+        WindowCaptureArgs args,
+        CancellationToken cancellationToken)
+    {
+        if (_screenRecordingService == null)
+            throw new InvalidOperationException("Exact-window capture service not available");
+        return _screenRecordingService.CaptureWindowAsync(args, cancellationToken);
+    }
+
     private async Task<ScreenCaptureResult> OnScreenCapture(
         ScreenCaptureArgs args,
         CancellationToken cancellationToken)
