@@ -290,7 +290,7 @@ public class McpToolBridge
         ["system.run.prepare"] =
             "Pre-flight a system.run invocation: returns the parsed execution plan (argv, cwd, rawCommand, agentId, sessionKey) without running anything. The gateway uses this to build its approval context before the actual run.",
         ["system.which"] =
-            "Resolve executable names to absolute paths by searching PATH (PATHEXT-aware on Windows). Args: bins (string[], required). Returns { bins: { name: resolvedPath, ... } } including only names that were found.",
+            "Resolve executable names to absolute paths by searching PATH (PATHEXT-aware on Windows). Args: bins (string[], required). Returns { bins: { name: resolvedPath, ... }, notFound: string[] }. PATH-only: use device.toolchain for versioned installations such as Unity, Blender, or Visual Studio that may not be on PATH.",
         ["system.execApprovals.get"] =
             "Return the current exec approval policy: { enabled, defaultAction ('allow'|'deny'|'prompt'), rules: [{ pattern, action, shells, description, enabled }, ...] }.",
         ["system.execApprovals.set"] =

@@ -30,6 +30,63 @@ public sealed class HostCapabilityFileReadTests
     }
 
     [Fact]
+    public async Task FileRead_ReturnsUtf8TextPayload()
+    {
+        using var root = new TemporaryDirectory();
+        var path = Path.Combine(root.Path, "sample.txt");
+        var bytes = Encoding.UTF8.GetBytes("hello\nworld");
+        await File.WriteAllBytesAsync(path, bytes);
+
+        var capability = new HostCapability(NullLogger.Instance, [root.Path]);
+        var response = await capability.ExecuteAsync(Request(path));
+
+        Assert.True(response.Ok, response.Error);
+        using var payload = JsonDocument.Parse(JsonSerializer.Serialize(response.Payload));
+        var value = payload.RootElement;
+        Assert.Equal("text/plain; charset=utf-8", value.GetProperty("mimeType").GetString());
+        Assert.Equal(Convert.ToBase64String(bytes), value.GetProperty("base64").GetString());
+    }
+
+    [Fact]
+    public async Task FileRead_ReturnsUtf16LeTextPayload()
+    {
+        using var root = new TemporaryDirectory();
+        var path = Path.Combine(root.Path, "sample-utf16.txt");
+        var body = Encoding.Unicode.GetBytes("hello\r\nworld");
+        var bytes = new byte[body.Length + 2];
+        bytes[0] = 0xFF;
+        bytes[1] = 0xFE;
+        Buffer.BlockCopy(body, 0, bytes, 2, body.Length);
+        await File.WriteAllBytesAsync(path, bytes);
+
+        var capability = new HostCapability(NullLogger.Instance, [root.Path]);
+        var response = await capability.ExecuteAsync(Request(path));
+
+        Assert.True(response.Ok, response.Error);
+        using var payload = JsonDocument.Parse(JsonSerializer.Serialize(response.Payload));
+        Assert.Equal(
+            "text/plain; charset=utf-16le",
+            payload.RootElement.GetProperty("mimeType").GetString());
+    }
+
+    [Fact]
+    public async Task FileRead_LeavesBinaryPayloadAsOctetStream()
+    {
+        using var root = new TemporaryDirectory();
+        var path = Path.Combine(root.Path, "sample.bin");
+        await File.WriteAllBytesAsync(path, [0x00, 0x01, 0x02, 0x03, 0xFF]);
+
+        var capability = new HostCapability(NullLogger.Instance, [root.Path]);
+        var response = await capability.ExecuteAsync(Request(path));
+
+        Assert.True(response.Ok, response.Error);
+        using var payload = JsonDocument.Parse(JsonSerializer.Serialize(response.Payload));
+        Assert.Equal(
+            "application/octet-stream",
+            payload.RootElement.GetProperty("mimeType").GetString());
+    }
+
+    [Fact]
     public async Task FileRead_RejectsOutsideApprovedRoot()
     {
         using var root = new TemporaryDirectory();

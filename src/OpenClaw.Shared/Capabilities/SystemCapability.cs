@@ -206,15 +206,18 @@ public class SystemCapability : NodeCapabilityBase
             return Error("Missing bins parameter");
 
         var found = new Dictionary<string, string>();
+        var missing = new List<string>();
         foreach (var bin in bins)
         {
             var resolved = ResolveExecutable(bin);
             if (resolved != null)
                 found[bin] = resolved;
+            else
+                missing.Add(bin);
         }
 
         Logger.Info($"system.which: queried {bins.Length} bins, found {found.Count}");
-        return Success(new { bins = found });
+        return Success(new { bins = found, notFound = missing });
     }
     
     /// <summary>
