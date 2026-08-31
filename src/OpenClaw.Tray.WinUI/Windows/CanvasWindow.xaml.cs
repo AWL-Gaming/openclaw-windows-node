@@ -15,6 +15,7 @@ using OpenClawTray.Helpers;
 using OpenClawTray.Services;
 using WinUIEx;
 using Windows.Foundation;
+using Windows.Storage;
 using Windows.Storage.Streams;
 using Windows.System;
 
@@ -40,6 +41,7 @@ public sealed partial class CanvasWindow : WindowEx
     private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_SHOWWINDOW = 0x0040;
+    private const string LocalFileVirtualHost = "openclaw-local-file.local";
 
     private bool _isWebViewInitialized;
     private bool _isFullScreen;
@@ -57,6 +59,9 @@ public sealed partial class CanvasWindow : WindowEx
     private TypedEventHandler<CoreWebView2, CoreWebView2WebMessageReceivedEventArgs>? _webMessageReceivedHandler;
     private TypedEventHandler<CoreWebView2, CoreWebView2WebResourceRequestedEventArgs>? _webResourceRequestedHandler;
     private string? _webResourceRequestedFilter;
+    private TypedEventHandler<CoreWebView2, CoreWebView2WebResourceRequestedEventArgs>? _localFileWebResourceRequestedHandler;
+    private string? _localFileWebResourceRequestedFilter;
+    private readonly Dictionary<string, string> _localFileRoots = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Fired when the SPA sends a message to the native side via
@@ -380,6 +385,7 @@ public sealed partial class CanvasWindow : WindowEx
             CanvasWebView.CoreWebView2.WebMessageReceived += _webMessageReceivedHandler;
 
             ConfigureGatewayAuthHeaderInjection();
+            ConfigureLocalFileServing();
 
             // Handle navigation events
             CanvasWebView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
@@ -495,6 +501,152 @@ public sealed partial class CanvasWindow : WindowEx
         }
     }
     
+    private void ConfigureLocalFileServing()
+    {
+        var coreWebView2 = CanvasWebView.CoreWebView2;
+        if (coreWebView2 == null)
+            return;
+
+        RemoveLocalFileServing(coreWebView2);
+        _localFileWebResourceRequestedFilter = $"https://{LocalFileVirtualHost}/*";
+        _localFileWebResourceRequestedHandler = OnLocalFileWebResourceRequested;
+        coreWebView2.AddWebResourceRequestedFilter(
+            _localFileWebResourceRequestedFilter,
+            CoreWebView2WebResourceContext.All);
+        coreWebView2.WebResourceRequested += _localFileWebResourceRequestedHandler;
+    }
+
+    private void RemoveLocalFileServing(CoreWebView2 coreWebView2)
+    {
+        if (_localFileWebResourceRequestedHandler != null)
+        {
+            coreWebView2.WebResourceRequested -= _localFileWebResourceRequestedHandler;
+            _localFileWebResourceRequestedHandler = null;
+        }
+
+        if (!string.IsNullOrEmpty(_localFileWebResourceRequestedFilter))
+        {
+            coreWebView2.RemoveWebResourceRequestedFilter(
+                _localFileWebResourceRequestedFilter,
+                CoreWebView2WebResourceContext.All);
+            _localFileWebResourceRequestedFilter = null;
+        }
+
+        _localFileRoots.Clear();
+    }
+
+    private void OnLocalFileWebResourceRequested(
+        CoreWebView2 sender,
+        CoreWebView2WebResourceRequestedEventArgs args) =>
+        AsyncEventHandlerGuard.Run(
+            () => OnLocalFileWebResourceRequestedAsync(sender, args),
+            operationName: nameof(OnLocalFileWebResourceRequested));
+
+    private async Task OnLocalFileWebResourceRequestedAsync(
+        CoreWebView2 sender,
+        CoreWebView2WebResourceRequestedEventArgs args)
+    {
+        if (!Uri.TryCreate(args.Request.Uri, UriKind.Absolute, out var uri)
+            || !string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(uri.IdnHost, LocalFileVirtualHost, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var deferral = args.GetDeferral();
+        try
+        {
+            var segments = uri.AbsolutePath
+                .Split('/', StringSplitOptions.RemoveEmptyEntries)
+                .Select(Uri.UnescapeDataString)
+                .ToArray();
+            if (segments.Length < 2 || !_localFileRoots.TryGetValue(segments[0], out var root))
+            {
+                args.Response = await CreateLocalFileResponseAsync(sender, null, 404, "Not Found");
+                return;
+            }
+
+            var relativePath = Path.Combine(segments.Skip(1).ToArray());
+            var normalizedRoot = Path.GetFullPath(root);
+            var rootPrefix = normalizedRoot.EndsWith(Path.DirectorySeparatorChar)
+                ? normalizedRoot
+                : normalizedRoot + Path.DirectorySeparatorChar;
+            var candidate = Path.GetFullPath(Path.Combine(normalizedRoot, relativePath));
+            if (!candidate.Equals(normalizedRoot, StringComparison.OrdinalIgnoreCase)
+                && !candidate.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                args.Response = await CreateLocalFileResponseAsync(sender, null, 403, "Forbidden");
+                return;
+            }
+
+            if (Directory.Exists(candidate))
+                candidate = Path.Combine(candidate, "index.html");
+
+            if (!File.Exists(candidate))
+            {
+                args.Response = await CreateLocalFileResponseAsync(sender, null, 404, "Not Found");
+                return;
+            }
+
+            args.Response = await CreateLocalFileResponseAsync(sender, candidate, 200, "OK");
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"[Canvas] local file request failed: {ex.GetType().Name}: {ex.Message}");
+            args.Response = await CreateLocalFileResponseAsync(sender, null, 500, "Internal Server Error");
+        }
+        finally
+        {
+            deferral.Complete();
+        }
+    }
+
+    private static async Task<CoreWebView2WebResourceResponse> CreateLocalFileResponseAsync(
+        CoreWebView2 sender,
+        string? filePath,
+        int statusCode,
+        string reasonPhrase)
+    {
+        IRandomAccessStream content;
+        if (filePath is null)
+        {
+            content = new InMemoryRandomAccessStream();
+        }
+        else
+        {
+            var storageFile = await StorageFile.GetFileFromPathAsync(filePath);
+            content = await storageFile.OpenReadAsync();
+        }
+
+        var headers = filePath is null
+            ? "Cache-Control: no-store"
+            : $"Content-Type: {GetLocalFileContentType(filePath)}\r\nCache-Control: no-store";
+        return sender.Environment.CreateWebResourceResponse(content, statusCode, reasonPhrase, headers);
+    }
+
+    private static string GetLocalFileContentType(string path)
+        => Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            ".html" or ".htm" => "text/html; charset=utf-8",
+            ".css" => "text/css; charset=utf-8",
+            ".js" or ".mjs" => "text/javascript; charset=utf-8",
+            ".json" => "application/json; charset=utf-8",
+            ".txt" or ".md" => "text/plain; charset=utf-8",
+            ".svg" => "image/svg+xml",
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".gif" => "image/gif",
+            ".webp" => "image/webp",
+            ".ico" => "image/x-icon",
+            ".woff" => "font/woff",
+            ".woff2" => "font/woff2",
+            ".mp4" => "video/mp4",
+            ".webm" => "video/webm",
+            ".mp3" => "audio/mpeg",
+            ".wav" => "audio/wav",
+            _ => "application/octet-stream"
+        };
+
     private void OnNavigationCompleted(CoreWebView2 sender, CoreWebView2NavigationCompletedEventArgs args)
     {
         if (_navigationTcs != null)
@@ -556,6 +708,7 @@ public sealed partial class CanvasWindow : WindowEx
                 _webMessageReceivedHandler = null;
             }
             RemoveGatewayAuthHeaderInjection(CanvasWebView.CoreWebView2);
+            RemoveLocalFileServing(CanvasWebView.CoreWebView2);
             CanvasWebView.CoreWebView2.NavigationCompleted -= OnNavigationCompleted;
         }
 
@@ -627,15 +780,13 @@ public sealed partial class CanvasWindow : WindowEx
         if (string.IsNullOrWhiteSpace(directory))
             throw new InvalidOperationException("Canvas local file has no parent directory");
 
-        const string localFileHost = "openclaw-local-file.local";
-        CanvasWebView.CoreWebView2.ClearVirtualHostNameToFolderMapping(localFileHost);
-        CanvasWebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
-            localFileHost,
-            directory,
-            CoreWebView2HostResourceAccessKind.Allow);
+        var normalizedRoot = Path.GetFullPath(directory);
+        var rootToken = Guid.NewGuid().ToString("N");
+        _localFileRoots.Clear();
+        _localFileRoots[rootToken] = normalizedRoot;
 
         var fileName = Uri.EscapeDataString(Path.GetFileName(localPath));
-        return $"https://{localFileHost}/{fileName}{fileUri.Query}{fileUri.Fragment}";
+        return $"https://{LocalFileVirtualHost}/{rootToken}/{fileName}{fileUri.Query}{fileUri.Fragment}";
     }
     
     /// <summary>
@@ -912,7 +1063,7 @@ public sealed partial class CanvasWindow : WindowEx
         // Accept messages only from our two internal virtual canvas hosts.
         if (string.Equals(sourceOrigin.Scheme, "https", StringComparison.OrdinalIgnoreCase) &&
             (string.Equals(sourceOrigin.IdnHost, "openclaw-canvas.local", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(sourceOrigin.IdnHost, "openclaw-local-file.local", StringComparison.OrdinalIgnoreCase)))
+             string.Equals(sourceOrigin.IdnHost, LocalFileVirtualHost, StringComparison.OrdinalIgnoreCase)))
             return true;
 
         // Accept messages from the configured gateway origin

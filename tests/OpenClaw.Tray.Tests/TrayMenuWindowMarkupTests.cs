@@ -69,7 +69,7 @@ public class TrayMenuWindowMarkupTests
     }
 
     [Fact]
-    public void CanvasLocalFiles_UseVirtualHostAndWaitForNavigationCompletion()
+    public void CanvasLocalFiles_UseHostBrokerAndWaitForNavigationCompletion()
     {
         var source = Read(
             "src",
@@ -79,8 +79,13 @@ public class TrayMenuWindowMarkupTests
 
         Assert.Contains("openclaw-local-file.local", source);
         Assert.Contains("PrepareWebViewNavigationUrl", source);
-        Assert.Contains("SetVirtualHostNameToFolderMapping", source);
-        Assert.Contains("ClearVirtualHostNameToFolderMapping", source);
+        Assert.Contains("ConfigureLocalFileServing", source);
+        Assert.Contains("OnLocalFileWebResourceRequested", source);
+        Assert.Contains("args.GetDeferral()", source);
+        Assert.Contains("StorageFile.GetFileFromPathAsync(filePath)", source);
+        Assert.Contains("await storageFile.OpenReadAsync()", source);
+        Assert.Contains("CreateWebResourceResponse(content", source);
+        Assert.Contains("_localFileRoots[rootToken] = normalizedRoot", source);
         Assert.Contains("await NavigateAndWaitAsync(PrepareWebViewNavigationUrl(url))", source);
     }
 
