@@ -377,16 +377,66 @@ public sealed class HostCapability : NodeCapabilityBase
             throw new InvalidOperationException("private key material is protected");
     }
 
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+    private static readonly UnicodeEncoding StrictUtf16Le = new(false, false, true);
+    private static readonly UnicodeEncoding StrictUtf16Be = new(true, false, true);
+
     private static string InferFileReadMime(byte[] bytes)
     {
         ReadOnlySpan<byte> png = [0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A];
         ReadOnlySpan<byte> jpeg = [0xFF, 0xD8, 0xFF];
+        ReadOnlySpan<byte> utf16LeBom = [0xFF, 0xFE];
+        ReadOnlySpan<byte> utf16BeBom = [0xFE, 0xFF];
+        ReadOnlySpan<byte> utf8Bom = [0xEF, 0xBB, 0xBF];
         if (bytes.AsSpan().StartsWith(png))
             return "image/png";
         if (bytes.AsSpan().StartsWith(jpeg))
             return "image/jpeg";
+
+        if (bytes.AsSpan().StartsWith(utf16LeBom) &&
+            TryDecodeSafeText(StrictUtf16Le, bytes.AsSpan(2)))
+        {
+            return "text/plain; charset=utf-16le";
+        }
+        if (bytes.AsSpan().StartsWith(utf16BeBom) &&
+            TryDecodeSafeText(StrictUtf16Be, bytes.AsSpan(2)))
+        {
+            return "text/plain; charset=utf-16be";
+        }
+
+        var utf8 = bytes.AsSpan();
+        if (utf8.StartsWith(utf8Bom))
+            utf8 = utf8[3..];
+        if (TryDecodeSafeText(StrictUtf8, utf8))
+            return "text/plain; charset=utf-8";
+
         return "application/octet-stream";
     }
+
+    private static bool TryDecodeSafeText(Encoding encoding, ReadOnlySpan<byte> bytes)
+    {
+        try
+        {
+            return IsSafeText(encoding.GetString(bytes));
+        }
+        catch (DecoderFallbackException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsSafeText(string text)
+    {
+        foreach (var value in text)
+        {
+            if (value is '\t' or '\r' or '\n')
+                continue;
+            if (char.IsControl(value))
+                return false;
+        }
+        return true;
+    }
+
     private NodeInvokeResponse FileStat(JsonElement args)
     {
         var path = RequirePath(args, "path");

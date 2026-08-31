@@ -144,6 +144,10 @@ public class SystemCapabilityTests
             JsonSerializer.Serialize(res.Payload));
         Assert.True(payload.TryGetProperty("bins", out var binsEl));
         Assert.False(binsEl.TryGetProperty("totally_nonexistent_binary_xyz123", out _));
+        Assert.True(payload.TryGetProperty("notFound", out var notFound));
+        Assert.Contains(
+            notFound.EnumerateArray().Select(value => value.GetString()),
+            value => value == "totally_nonexistent_binary_xyz123");
     }
 
     [Fact]
