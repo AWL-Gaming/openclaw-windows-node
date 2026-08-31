@@ -1302,7 +1302,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
 
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         var cts = new CancellationTokenSource();
-        if (!_dispatcherQueue.TryEnqueue(() =>
+        if (!_dispatcherQueue.TryEnqueue(async () =>
         {
             if (cts.IsCancellationRequested) return;
             try
@@ -1312,7 +1312,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
                 if (_canvasWindow == null)
                     throw new InvalidOperationException("Canvas window unavailable");
 
-                _canvasWindow.Navigate(canonical!);
+                await _canvasWindow.NavigateAsync(canonical!);
                 _canvasWindow.BringToFront(false);
                 _logger.Info($"Canvas navigate -> canvas: {OpenClaw.Shared.UrlLogSanitizer.Sanitize(canonical)}");
                 tcs.TrySetResult("canvas");

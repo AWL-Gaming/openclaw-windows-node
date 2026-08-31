@@ -34,11 +34,10 @@ public static class CanvasUrlSafety
             return false;
         }
 
-        if (!string.IsNullOrEmpty(uri.Host)
-            && !string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase))
-        {
+        // Any authority, including localhost, becomes a UNC path on Windows. Keep this
+        // capability drive-local and avoid reintroducing SMB/network transport through file://.
+        if (!string.IsNullOrEmpty(uri.Host))
             return false;
-        }
 
         canonical = uri.AbsoluteUri;
         return true;

@@ -399,7 +399,7 @@ public sealed partial class CanvasWindow : WindowEx
                 // Re-validate URL before navigation (defense in depth)
                 if (IsUrlSafe(url))
                 {
-                    CanvasWebView.CoreWebView2.Navigate(url);
+                    CanvasWebView.CoreWebView2.Navigate(PrepareWebViewNavigationUrl(url));
                 }
                 else
                 {
@@ -572,28 +572,70 @@ public sealed partial class CanvasWindow : WindowEx
     }
     
     /// <summary>
-    /// Navigate to a URL (validates URL security)
+    /// Navigate to a URL (validates URL security).
     /// </summary>
     public void Navigate(string url)
     {
-        // Rewrite gateway URLs to use the node's effective connection
-        // (e.g., gateway sends 192.168.1.254 but we're tunneled to localhost)
-        url = RewriteGatewayUrl(url);
+        url = ValidateAndRewriteNavigationUrl(url);
 
-        // Validate URL - block dangerous schemes and private networks
-        if (!IsUrlSafe(url))
-        {
-            throw new ArgumentException($"URL blocked for security: {url.Substring(0, Math.Min(50, url.Length))}...");
-        }
-        
         if (_isWebViewInitialized)
         {
-            CanvasWebView.CoreWebView2.Navigate(url);
+            CanvasWebView.CoreWebView2.Navigate(PrepareWebViewNavigationUrl(url));
         }
         else
         {
             _pendingUrl = url;
         }
+    }
+
+    /// <summary>
+    /// Navigate and complete only after WebView2 reports navigation success or failure.
+    /// </summary>
+    public async Task NavigateAsync(string url)
+    {
+        url = ValidateAndRewriteNavigationUrl(url);
+        await EnsureWebViewReadyAsync();
+        if (!_isWebViewInitialized)
+            throw new InvalidOperationException("WebView2 not initialized");
+
+        await NavigateAndWaitAsync(PrepareWebViewNavigationUrl(url));
+    }
+
+    private string ValidateAndRewriteNavigationUrl(string url)
+    {
+        // Rewrite gateway URLs to use the node's effective connection
+        // (e.g., gateway sends 192.168.1.254 but we're tunneled to localhost).
+        url = RewriteGatewayUrl(url);
+
+        if (!IsUrlSafe(url))
+            throw new ArgumentException($"URL blocked for security: {url.Substring(0, Math.Min(50, url.Length))}...");
+
+        return url;
+    }
+
+    private string PrepareWebViewNavigationUrl(string url)
+    {
+        if (!CanvasUrlSafety.TryNormalizeLocalFileUri(url, out var canonicalFileUrl))
+            return url;
+
+        var fileUri = new Uri(canonicalFileUrl);
+        var localPath = fileUri.LocalPath;
+        if (!File.Exists(localPath))
+            throw new FileNotFoundException("Canvas local file does not exist", localPath);
+
+        var directory = Path.GetDirectoryName(localPath);
+        if (string.IsNullOrWhiteSpace(directory))
+            throw new InvalidOperationException("Canvas local file has no parent directory");
+
+        const string localFileHost = "openclaw-local-file.local";
+        CanvasWebView.CoreWebView2.ClearVirtualHostNameToFolderMapping(localFileHost);
+        CanvasWebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+            localFileHost,
+            directory,
+            CoreWebView2HostResourceAccessKind.Allow);
+
+        var fileName = Uri.EscapeDataString(Path.GetFileName(localPath));
+        return $"https://{localFileHost}/{fileName}{fileUri.Query}{fileUri.Fragment}";
     }
     
     /// <summary>
@@ -867,9 +909,10 @@ public sealed partial class CanvasWindow : WindowEx
         if (!TryGetUriOrigin(source, out var sourceOrigin))
             return false;
 
-        // Accept messages from the virtual canvas host
+        // Accept messages only from our two internal virtual canvas hosts.
         if (string.Equals(sourceOrigin.Scheme, "https", StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(sourceOrigin.IdnHost, "openclaw-canvas.local", StringComparison.OrdinalIgnoreCase))
+            (string.Equals(sourceOrigin.IdnHost, "openclaw-canvas.local", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(sourceOrigin.IdnHost, "openclaw-local-file.local", StringComparison.OrdinalIgnoreCase)))
             return true;
 
         // Accept messages from the configured gateway origin

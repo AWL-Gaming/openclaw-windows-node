@@ -63,9 +63,25 @@ public class TrayMenuWindowMarkupTests
         Assert.Contains("risk.RequiresConfirmation", source);
         Assert.Contains("return \"unsupported_in_canvas\"", source);
         Assert.DoesNotContain("ShouldLaunchAfterPromptAsync(risk)", source);
-        Assert.Contains("_canvasWindow.Navigate(canonical!)", source);
+        Assert.Contains("await _canvasWindow.NavigateAsync(canonical!)", source);
         Assert.Contains("tcs.TrySetResult(\"canvas\")", source);
         Assert.Contains("Canvas navigate -> canvas", source);
+    }
+
+    [Fact]
+    public void CanvasLocalFiles_UseVirtualHostAndWaitForNavigationCompletion()
+    {
+        var source = Read(
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Windows",
+            "CanvasWindow.xaml.cs");
+
+        Assert.Contains("openclaw-local-file.local", source);
+        Assert.Contains("PrepareWebViewNavigationUrl", source);
+        Assert.Contains("SetVirtualHostNameToFolderMapping", source);
+        Assert.Contains("ClearVirtualHostNameToFolderMapping", source);
+        Assert.Contains("await NavigateAndWaitAsync(PrepareWebViewNavigationUrl(url))", source);
     }
 
     [Fact]
