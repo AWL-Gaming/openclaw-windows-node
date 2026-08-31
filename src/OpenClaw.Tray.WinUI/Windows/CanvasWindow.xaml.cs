@@ -282,7 +282,15 @@ public sealed partial class CanvasWindow : WindowEx
             contentRoot.KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
         }
 
-        // Initialize WebView2
+        // WebView2 must be attached to the loaded XAML tree before CoreWebView2
+        // is created. Starting initialization from the constructor can leave
+        // CoreWebView2 null in the hidden MCP-only desktop helper.
+        CanvasWebView.Loaded += OnCanvasWebViewLoaded;
+    }
+
+    private void OnCanvasWebViewLoaded(object sender, RoutedEventArgs args)
+    {
+        CanvasWebView.Loaded -= OnCanvasWebViewLoaded;
         InitializeWebViewAsync();
     }
     

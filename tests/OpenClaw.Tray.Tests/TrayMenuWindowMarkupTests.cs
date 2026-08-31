@@ -90,6 +90,22 @@ public class TrayMenuWindowMarkupTests
     }
 
     [Fact]
+    public void CanvasWebViewInitialization_WaitsForLoadedVisualTree()
+    {
+        var source = Read(
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Windows",
+            "CanvasWindow.xaml.cs");
+
+        Assert.Contains("CanvasWebView.Loaded += OnCanvasWebViewLoaded", source);
+        Assert.Contains("CanvasWebView.Loaded -= OnCanvasWebViewLoaded", source);
+        Assert.Contains("private void OnCanvasWebViewLoaded", source);
+        Assert.Contains("InitializeWebViewAsync();", source);
+        Assert.DoesNotContain("// Initialize WebView2\n        InitializeWebViewAsync();", source);
+    }
+
+    [Fact]
     public void CanvasGatewayOrigin_ComesFromActiveGatewayRecord()
     {
         var appSource = Read(
