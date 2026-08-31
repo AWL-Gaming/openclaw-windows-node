@@ -312,7 +312,7 @@ public class McpToolBridge
         ["canvas.hide"] =
             "Hide the Canvas window without destroying its state.",
         ["canvas.navigate"] =
-            "Navigate the existing Canvas to a new location. Args: url (string, required) — accepts http(s), file://, or local canvas paths.",
+            "Navigate the existing Canvas to a new location. Args: url (string, required) — accepts http(s) and local file:// URIs; remote UNC file authorities and shell/application protocols remain blocked.",
         ["canvas.eval"] =
             "Evaluate a JavaScript expression inside the Canvas WebView and return its result. Args: script | javaScript | javascript (string, required).",
         ["canvas.snapshot"] =
@@ -366,7 +366,7 @@ public class McpToolBridge
         ["app.status"] =
             "Get current connection status, manager-owned overall/operator/node state, and gateway info. Returns { connectionStatus, overallState, operatorState, nodeState, nodeConnected, nodePaired, nodePendingApproval, nodeError, gatewayVersion, sessionCount, nodeCount }.",
         ["app.sessions"] =
-            "List active sessions with optional agent filter. Args: agentId (string, optional). Returns array of { Key, Status, Model, AgeText, tokens }.",
+            "List active sessions with optional agent filter. Args: agentId (string, optional), maxEntries (int, optional, default 50, range 1..500). Returns up to maxEntries items as { Key, Status, Model, AgeText, tokens }.",
         ["app.agents"] =
             "List agents from the connected gateway. Returns the raw agents JSON array.",
         ["app.nodes"] =
@@ -384,7 +384,7 @@ public class McpToolBridge
         ["app.dashboard.url"] =
             "Build the same gateway dashboard URL the tray opens. Args: path (string, optional). Returns { url, credentialSource, usesSharedGatewayToken, hasTokenQuery }.",
         ["app.chat.snapshot"] =
-            "READ-ALL: Return the current native chat snapshot for local automation. Args: threadId/sessionKey (string, optional). Returns connection state, compose target, thread summaries, queued outgoing messages, and recent timeline entries including chat text.",
+            "Return the current native chat snapshot for local automation. Args: threadId/sessionKey (string, optional). When a thread is supplied, returns only that thread summary, its queue, and recent timeline entries; omit the thread to return the full thread catalog.",
         ["app.chat.send"] =
             "Send a message through the native chat provider. Args: message (string, required), threadId/sessionKey (string, optional; defaults to the current compose/default thread). Returns { sent, threadId, entryCount, turnActive, error? }.",
         ["app.chat.reset"] =
@@ -428,7 +428,7 @@ public class McpToolBridge
 
         // browser.*
         ["browser.proxy"] =
-            "Proxy an HTTP request to the local OpenClaw browser control host (CDP server) running on gateway port + 2. Args: path (string, required — a local control path like '/json/list' or '/json/activate/<id>'), method ('GET'|'POST'|'DELETE', default 'GET'), body (JSON object, POST/DELETE only), query (object, appended as query params), profile (string, optional browser profile), timeoutMs (int, default 20000, max 120000). Returns { result, files? } where files is present if the response included local file paths. Requires the gateway URL to have an explicit port and the browser control host to be running.",
+            "Proxy an HTTP request to the local OpenClaw browser control host running on gateway port + 2. Args: path (string, required — use OpenClaw control routes such as '/tabs' or '/'; this is not Chrome's raw /json/* endpoint), method ('GET'|'POST'|'DELETE', default 'GET'), body (JSON object, POST/DELETE only), query (object, appended as query params), profile (string, optional browser profile), timeoutMs (int, default 20000, max 120000). Returns { result, files? } where files is present if the response included local file paths. Requires the gateway URL to have an explicit port and the browser control host to be running.",
     };
 
     private object? HandleCancelledNotification(JsonElement parameters)

@@ -77,6 +77,35 @@ public class AppCapabilityTests
     }
 
     [Fact]
+    public async Task Sessions_DefaultsAndClampsMaxEntries()
+    {
+        var cap = new AppCapability(NullLogger.Instance);
+        var observed = new List<int>();
+        cap.SessionsHandler = (_, maxEntries) =>
+        {
+            observed.Add(maxEntries);
+            return Task.FromResult<object?>(Array.Empty<object>());
+        };
+
+        var defaultReq = new NodeInvokeRequest
+        {
+            Id = "sessions-default",
+            Command = "app.sessions",
+            Args = ParseArgs("{}")
+        };
+        var cappedReq = new NodeInvokeRequest
+        {
+            Id = "sessions-capped",
+            Command = "app.sessions",
+            Args = ParseArgs("{\"maxEntries\":9999}")
+        };
+
+        Assert.True((await cap.ExecuteAsync(defaultReq)).Ok);
+        Assert.True((await cap.ExecuteAsync(cappedReq)).Ok);
+        Assert.Equal(new[] { 50, 500 }, observed);
+    }
+
+    [Fact]
     public async Task SettingsGet_WithNoHandler_ReturnsError()
     {
         var cap = new AppCapability(NullLogger.Instance);

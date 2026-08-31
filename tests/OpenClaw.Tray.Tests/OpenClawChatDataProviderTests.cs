@@ -2031,6 +2031,34 @@ public class OpenClawChatDataProviderTests
     }
 
     [Fact]
+    public async Task RepeatedGatewayUserFrame_WithSameIdentity_IsIdempotent()
+    {
+        var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });
+        bridge.SendResults.Enqueue(new ChatSendResult { RunId = "run-1", Status = "started" });
+        await provider.LoadAsync();
+        bridge.RaiseStatus(ConnectionStatus.Connected);
+        snapshots.Clear();
+
+        await provider.SendMessageAsync("main", "duplicate-safe");
+        var echo = new ChatMessageInfo
+        {
+            SessionKey = "main",
+            Role = "user",
+            Text = "duplicate-safe",
+            State = "final",
+            OpenClawId = "msg-duplicate-safe",
+            OpenClawSeq = 101,
+            Ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
+
+        bridge.RaiseChat(echo);
+        bridge.RaiseChat(echo);
+
+        Assert.Single(snapshots[^1].Timelines["main"].Entries, e =>
+            e.Kind == ChatTimelineItemKind.User && e.Text == "duplicate-safe");
+    }
+
+    [Fact]
     public async Task LifecycleStart_DoesNotClearNextQueuedMessageWhenEarlierEchoAlreadyClearedItsCard()
     {
         var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });

@@ -578,7 +578,8 @@ public sealed class AppRefactorContractTests
         var queueMessageMethod = ExtractMethod(source, "ToMcpQueuedMessage");
         var cancelMethod = ExtractMethod(source, "CancelQueuedChatMessageForMcpAsync");
 
-        Assert.Contains("queue = BuildChatQueuePayload(snapshot, resolvedThreadId, filterToThread: false)", snapshotMethod);
+        Assert.Contains("queue = BuildChatQueuePayload(snapshot, resolvedThreadId, filterToThread)", snapshotMethod);
+        Assert.Contains(".Where(t => !filterToThread || string.Equals(t.Id, resolvedThreadId, StringComparison.Ordinal))", snapshotMethod);
         Assert.Contains("snapshot.QueuedMessagesByThread", queueMethod);
         Assert.Contains("sendState = message.SendState.ToString()", queueMessageMethod);
         Assert.Contains("canCancel = CanCancelQueuedMessage(message)", queueMessageMethod);

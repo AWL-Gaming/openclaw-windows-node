@@ -1760,7 +1760,6 @@ public class CanvasCapabilityTests
 
     [Theory]
     [InlineData("javascript:alert(1)")]
-    [InlineData("file:///C:/Windows/System32/calc.exe")]
     [InlineData("ms-settings:network")]
     [InlineData("/relative/path")]
     [InlineData("https://attacker@evil.example.com/")]
@@ -1784,6 +1783,52 @@ public class CanvasCapabilityTests
         Assert.False(res.Ok);
         Assert.False(handlerCalled);
         Assert.Contains("Invalid url", res.Error);
+    }
+
+    [Fact]
+    public async Task Navigate_LocalFileUri_InvokesCanvasHandler()
+    {
+        var cap = new CanvasCapability(NullLogger.Instance);
+        string? capturedUrl = null;
+        cap.NavigateRequested += url =>
+        {
+            capturedUrl = url;
+            return Task.FromResult("canvas");
+        };
+
+        var req = new NodeInvokeRequest
+        {
+            Id = "c12c-file",
+            Command = "canvas.navigate",
+            Args = Parse("""{"url":"file:///C:/Windows/Temp/awl-canvas-test.html"}""")
+        };
+        var res = await cap.ExecuteAsync(req);
+
+        Assert.True(res.Ok);
+        Assert.Equal("file:///C:/Windows/Temp/awl-canvas-test.html", capturedUrl);
+    }
+
+    [Fact]
+    public async Task Navigate_RemoteUncFileUri_IsRejected()
+    {
+        var cap = new CanvasCapability(NullLogger.Instance);
+        var handlerCalled = false;
+        cap.NavigateRequested += _ =>
+        {
+            handlerCalled = true;
+            return Task.FromResult("canvas");
+        };
+
+        var req = new NodeInvokeRequest
+        {
+            Id = "c12c-unc",
+            Command = "canvas.navigate",
+            Args = Parse("""{"url":"file://server/share/test.html"}""")
+        };
+        var res = await cap.ExecuteAsync(req);
+
+        Assert.False(res.Ok);
+        Assert.False(handlerCalled);
     }
 
     [Fact]

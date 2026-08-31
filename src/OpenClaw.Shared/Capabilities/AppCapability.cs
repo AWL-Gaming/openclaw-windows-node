@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -38,7 +39,7 @@ public class AppCapability : NodeCapabilityBase
     // Handler delegates — wired up by App.xaml.cs after construction.
     public Func<string, Task<object?>>? NavigateHandler;
     public Func<object?>? StatusHandler;
-    public Func<string?, Task<object?>>? SessionsHandler;
+    public Func<string?, int, Task<object?>>? SessionsHandler;
     public Func<Task<object?>>? AgentsHandler;
     public Func<object?>? NodesHandler;
     public Func<string?, Task<object?>>? ConfigGetHandler;
@@ -100,9 +101,16 @@ public class AppCapability : NodeCapabilityBase
     private async Task<NodeInvokeResponse> HandleSessions(NodeInvokeRequest request)
     {
         var agentId = GetStringArg(request.Args, "agentId");
+        var maxEntries = 50;
+        if (request.Args.ValueKind == JsonValueKind.Object
+            && request.Args.TryGetProperty("maxEntries", out var maxEntriesArg)
+            && maxEntriesArg.TryGetInt32(out var requestedMaxEntries))
+        {
+            maxEntries = Math.Clamp(requestedMaxEntries, 1, 500);
+        }
         if (SessionsHandler == null)
             return Error("Sessions handler not registered");
-        var result = await SessionsHandler(agentId);
+        var result = await SessionsHandler(agentId, maxEntries);
         return Success(result);
     }
 

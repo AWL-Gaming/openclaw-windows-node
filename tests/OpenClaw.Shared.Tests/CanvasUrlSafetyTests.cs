@@ -11,6 +11,24 @@ namespace OpenClaw.Shared.Tests;
 public class CanvasUrlSafetyTests
 {
     [Theory]
+    [InlineData("file:///C:/Windows/Temp/test.html")]
+    [InlineData("file://localhost/C:/Windows/Temp/test.html")]
+    public void TryNormalizeLocalFileUri_AllowsLocalFileAuthorities(string value)
+    {
+        Assert.True(CanvasUrlSafety.TryNormalizeLocalFileUri(value, out var canonical));
+        Assert.StartsWith("file://", canonical, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("file://server/share/test.html")]
+    [InlineData("https://example.com/test.html")]
+    [InlineData("javascript:alert(1)")]
+    public void TryNormalizeLocalFileUri_RejectsRemoteOrNonFileSchemes(string value)
+    {
+        Assert.False(CanvasUrlSafety.TryNormalizeLocalFileUri(value, out _));
+    }
+
+    [Theory]
     // canonical private / loopback / link-local
     [InlineData("127.0.0.1")]
     [InlineData("10.0.0.5")]

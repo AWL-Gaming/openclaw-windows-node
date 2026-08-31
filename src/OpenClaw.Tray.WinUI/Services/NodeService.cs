@@ -1278,17 +1278,26 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
     /// </summary>
     private async Task<string> OnCanvasNavigate(string url)
     {
-        if (!HttpUrlValidator.TryParse(url, out var canonical, out var validationError))
+        string? canonical;
+        var isLocalFile = CanvasUrlSafety.TryNormalizeLocalFileUri(url, out var localFileUrl);
+        if (isLocalFile)
+        {
+            canonical = localFileUrl;
+        }
+        else if (!HttpUrlValidator.TryParse(url, out canonical, out var validationError))
         {
             _logger.Warn($"OnCanvasNavigate rejected (validator): {validationError}");
             throw new InvalidOperationException($"Invalid url: {validationError}");
         }
 
-        var risk = await EnrichWithDnsRiskAsync(HttpUrlRiskEvaluator.Evaluate(canonical!)).ConfigureAwait(false);
-        if (risk.RequiresConfirmation)
+        if (!isLocalFile)
         {
-            _logger.Warn($"Canvas navigate unsupported in canvas: {OpenClaw.Shared.UrlLogSanitizer.Sanitize(risk.CanonicalOrigin)}");
-            return "unsupported_in_canvas";
+            var risk = await EnrichWithDnsRiskAsync(HttpUrlRiskEvaluator.Evaluate(canonical!)).ConfigureAwait(false);
+            if (risk.RequiresConfirmation)
+            {
+                _logger.Warn($"Canvas navigate unsupported in canvas: {OpenClaw.Shared.UrlLogSanitizer.Sanitize(risk.CanonicalOrigin)}");
+                return "unsupported_in_canvas";
+            }
         }
 
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);

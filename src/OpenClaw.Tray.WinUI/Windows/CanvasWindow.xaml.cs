@@ -84,6 +84,10 @@ public sealed partial class CanvasWindow : WindowEx
     /// </summary>
     private bool IsUrlSafe(string url)
     {
+        if (OpenClaw.Shared.CanvasUrlSafety.TryNormalizeLocalFileUri(url, out _))
+        {
+            return true;
+        }
         if (url.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
         {
             return IsSafeDataUrl(url);

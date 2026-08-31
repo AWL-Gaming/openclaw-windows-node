@@ -182,10 +182,15 @@ public class CanvasCapability : NodeCapabilityBase
             return Error("Missing url parameter");
         }
 
-        // Validate up front so the OS-level Process.Start in the subscriber
-        // can't be tricked into shell-executing javascript:/file:/app-protocol
-        // URIs. The subscriber re-validates as defense-in-depth.
-        if (!HttpUrlValidator.TryParse(rawUrl, out var canonical, out var validationError))
+        // Permit authenticated local file navigation without opening UNC/network file authorities.
+        // Other schemes still use the strict http(s) validator so OS shell protocols cannot escape.
+        string? canonical;
+        string? validationError = null;
+        if (CanvasUrlSafety.TryNormalizeLocalFileUri(rawUrl, out var localFileUrl))
+        {
+            canonical = localFileUrl;
+        }
+        else if (!HttpUrlValidator.TryParse(rawUrl, out canonical, out validationError))
         {
             // Avoid leaking the raw URL — agents sometimes hand us tokenized
             // OAuth/reset URLs that fail validation, and our log files have

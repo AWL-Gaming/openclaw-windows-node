@@ -68,13 +68,16 @@ public partial class App
             };
         };
 
-        app.SessionsHandler = async (agentId) =>
+        app.SessionsHandler = async (agentId, maxEntries) =>
         {
             var sessions = _appState!.Sessions ?? Array.Empty<SessionInfo>();
             if (!string.IsNullOrEmpty(agentId))
                 sessions = sessions.Where(s => s.Key != null &&
                     s.Key.StartsWith($"agent:{agentId}:", StringComparison.OrdinalIgnoreCase)).ToArray();
-            return sessions.Select(s => new { s.Key, s.Status, s.Model, s.AgeText, tokens = s.InputTokens + s.OutputTokens }).ToArray();
+            return sessions
+                .Take(maxEntries)
+                .Select(s => new { s.Key, s.Status, s.Model, s.AgeText, tokens = s.InputTokens + s.OutputTokens })
+                .ToArray();
         };
 
         app.AgentsHandler = async () =>
@@ -487,7 +490,7 @@ public partial class App
 
         var snapshot = await provider.LoadAsync();
         var resolvedThreadId = ResolveChatThreadId(snapshot, threadId);
-        return BuildChatSnapshotPayload(snapshot, resolvedThreadId);
+        return BuildChatSnapshotPayload(snapshot, resolvedThreadId, filterToThread: !string.IsNullOrWhiteSpace(threadId));
     }
 
     private async Task<object?> SendChatMessageForMcpAsync(string? threadId, string message)
@@ -636,7 +639,7 @@ public partial class App
         return snapshot.DefaultThreadId;
     }
 
-    private static object BuildChatSnapshotPayload(ChatDataSnapshot snapshot, string? resolvedThreadId)
+    private static object BuildChatSnapshotPayload(ChatDataSnapshot snapshot, string? resolvedThreadId, bool filterToThread)
     {
         var selectedTimeline = resolvedThreadId is not null
             && snapshot.Timelines.TryGetValue(resolvedThreadId, out var timeline)
@@ -653,21 +656,24 @@ public partial class App
                 sessionKey = snapshot.ComposeTarget.SessionKey,
                 isReady = snapshot.ComposeTarget.IsReady
             },
-            threads = snapshot.Threads.Select(t => new
-            {
-                t.Id,
-                t.Title,
-                status = t.Status.ToString(),
-                activity = t.Activity.ToString(),
-                t.Model,
-                t.ModelProvider,
-                t.ThinkingLevel,
-                t.InputTokens,
-                t.OutputTokens,
-                t.TotalTokens,
-                t.ContextTokens
-            }).ToArray(),
-            queue = BuildChatQueuePayload(snapshot, resolvedThreadId, filterToThread: false),
+            threads = snapshot.Threads
+                .Where(t => !filterToThread || string.Equals(t.Id, resolvedThreadId, StringComparison.Ordinal))
+                .Select(t => new
+                {
+                    t.Id,
+                    t.Title,
+                    status = t.Status.ToString(),
+                    activity = t.Activity.ToString(),
+                    t.Model,
+                    t.ModelProvider,
+                    t.ThinkingLevel,
+                    t.InputTokens,
+                    t.OutputTokens,
+                    t.TotalTokens,
+                    t.ContextTokens
+                })
+                .ToArray(),
+            queue = BuildChatQueuePayload(snapshot, resolvedThreadId, filterToThread),
             selectedTimeline = selectedTimeline is null ? null : new
             {
                 turnActive = selectedTimeline.TurnActive,

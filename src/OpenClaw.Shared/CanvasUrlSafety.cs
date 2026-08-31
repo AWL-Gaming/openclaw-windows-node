@@ -20,6 +20,30 @@ namespace OpenClaw.Shared;
 /// </summary>
 public static class CanvasUrlSafety
 {
+    /// <summary>
+    /// Accept a local file URI without allowing remote UNC authorities. This is used only by the
+    /// authenticated local canvas control surface; http(s) navigation keeps the network SSRF checks.
+    /// </summary>
+    public static bool TryNormalizeLocalFileUri(string? value, out string canonical)
+    {
+        canonical = string.Empty;
+        if (string.IsNullOrWhiteSpace(value)
+            || !Uri.TryCreate(value.Trim(), UriKind.Absolute, out var uri)
+            || !uri.IsFile)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrEmpty(uri.Host)
+            && !string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        canonical = uri.AbsoluteUri;
+        return true;
+    }
+
     /// <summary>True when <paramref name="host"/> is (any encoding of) a loopback/private/
     /// link-local/CGNAT/unique-local/unspecified address that a remote caller must not reach.</summary>
     public static bool IsPrivateOrLoopbackHost(string? host)

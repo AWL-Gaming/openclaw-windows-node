@@ -2736,22 +2736,31 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 return;
             }
 
-            // Check if this is an echo of a locally-sent message.
+            // Check gateway identity before text matching. A repeated gateway frame for the same
+            // persisted user message must be idempotent even after the one-shot local echo queue
+            // was consumed by the first frame.
             var echoText = (message.Text ?? "").Trim();
             bool isLocalEcho = false;
             ChatDataSnapshot? echoSnapshot = null;
+            ChatEntryMetadata inboundUserMeta;
             lock (_gate)
             {
+                inboundUserMeta = BuildLiveMetaLocked(
+                    msgThreadId,
+                    message.Ts,
+                    message.OpenClawId,
+                    message.OpenClawSeq);
+                if (HasSeenGatewayUserIdentityLocked(msgThreadId, inboundUserMeta))
+                {
+                    Logger.Debug($"[ChatProvider] Suppressed duplicate user frame for thread='{msgThreadId}' seq={message.OpenClawSeq}");
+                    return;
+                }
+
                 if (_localSentTexts.TryGetValue(msgThreadId, out var q) && q.Count > 0
                     && TryConsumeLocalEchoLocked(msgThreadId, q, echoText, out var echoEntryId))
                 {
                     isLocalEcho = true;
-                    var confirmedMeta = BuildLiveMetaLocked(
-                        msgThreadId,
-                        message.Ts,
-                        message.OpenClawId,
-                        message.OpenClawSeq);
-                    if (ReconcileQueuedMessageEchoLocked(msgThreadId, echoEntryId, confirmedMeta))
+                    if (ReconcileQueuedMessageEchoLocked(msgThreadId, echoEntryId, inboundUserMeta))
                         echoSnapshot = BuildSnapshotLocked();
                 }
             }
@@ -2768,15 +2777,10 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             if (!string.IsNullOrEmpty(message.Text))
             {
                 var userText = TruncateForChatEntry(EscapeUntrustedAttachmentMarkerLines(message.Text));
-                ChatEntryMetadata? userMeta;
+                ChatEntryMetadata? userMeta = inboundUserMeta;
                 ChatDataSnapshot? reconciledLocalQueuedSnapshot = null;
                 lock (_gate)
                 {
-                    userMeta = BuildLiveMetaLocked(
-                        msgThreadId,
-                        message.Ts,
-                        message.OpenClawId,
-                        message.OpenClawSeq);
                     if (TryReconcileExistingLocalQueuedUserEchoLocked(msgThreadId, userText, userMeta))
                         reconciledLocalQueuedSnapshot = BuildSnapshotLocked();
                 }
@@ -3605,6 +3609,26 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
 
     private static bool HasGatewayIdentity(ChatEntryMetadata meta)
         => !string.IsNullOrEmpty(meta.GatewayMessageId) || meta.OpenClawSeq is not null;
+
+    private bool HasSeenGatewayUserIdentityLocked(string threadId, ChatEntryMetadata candidate)
+    {
+        if (!HasGatewayIdentity(candidate) || !_entryMeta.TryGetValue(threadId, out var threadMeta))
+            return false;
+
+        foreach (var existing in threadMeta.Values)
+        {
+            if (!string.IsNullOrEmpty(candidate.GatewayMessageId)
+                && string.Equals(existing.GatewayMessageId, candidate.GatewayMessageId, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            if (candidate.OpenClawSeq is not null && existing.OpenClawSeq == candidate.OpenClawSeq)
+                return true;
+        }
+
+        return false;
+    }
 
     private static bool IsFreshLocalQueuedPromotion(ChatEntryMetadata existing, ChatEntryMetadata confirmed)
     {
