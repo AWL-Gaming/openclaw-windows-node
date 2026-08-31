@@ -296,6 +296,14 @@ public class McpToolBridge
         ["system.execApprovals.set"] =
             "Replace the exec approval policy. Args: rules (array of { pattern, action, shells?, description?, enabled? }), defaultAction (string, optional). Persisted to disk; used by future system.run calls.",
 
+        // host.* -- stable structured OS/application facade
+        ["host.describe"] =
+            "Describe structured private host operations currently available behind host.invoke. No side effects.",
+        ["host.invoke"] =
+            "Invoke a structured private host operation without shell quoting. Args: operation (required) plus operation-specific fields. Covers file/stat/list/write/append/mkdir/move/copy/delete/hash, process list/status/spawn/terminate, Windows service operations, zip pack/unpack, Git, private/local HTTP and MCP JSON-RPC, and exact PID+HWND window inspection/input/capture. window.input uses PostMessage only and never global SendInput or foreground switching. window.capture uses one bounded Windows Graphics Capture frame and never injects capture hooks into the target process.",
+        ["file.read"] =
+            "Read a bounded local file for private-fabric model presentation. Args: path (absolute local Windows path, required), maxBytes (positive integer, optional; default 512 KiB, hard cap 1 MiB). Reads are restricted to configured/default approved roots, protected OpenClaw/AWL secret locations and private-key material are denied, and the final opened path is revalidated against junction/reparse escapes. Returns { fileName, sizeBytes, mimeType, sha256, base64 }.",
+
         // canvas.* — agent-controlled WebView2 panel for HTML/CSS/JS, A2UI, and small interactive UI surfaces.
         ["canvas.present"] =
             "Show the agent-controlled Canvas window (WebView2). Args: url (string) or html (string), width (int, default 800), height (int, default 600), x/y (int, -1 = center), title (string, default 'Canvas'), alwaysOnTop (bool, default false). The Canvas is a lightweight visual workspace for HTML/CSS/JS, A2UI, and small interactive UI surfaces.",

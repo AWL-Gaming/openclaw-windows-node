@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Windows.Foundation;
 using Windows.Graphics.Capture;
 using Windows.Graphics.DirectX;
 using Windows.Graphics.DirectX.Direct3D11;
@@ -30,10 +31,12 @@ internal sealed class ScreenRecordingService : IDisposable
     private const int MaxDurationMs = 60_000;
     private const int PoolBuffers   = 2;
 
-    // BGRA frame buffer safety cap: ~500 MB across all queued frames.
-    // At 1080p (8 MB/frame) this allows ~62 frames; at 720p (~4 MB) ~125 frames.
+    // BGRA frame buffer safety cap: 128 MB across all queued frames.
+    // At 1080p (8 MB/frame) this allows ~16 frames; at 720p (~4 MB) ~32 frames.
     // Frames beyond this limit are dropped to prevent OOM on long/high-fps recordings.
-    private const long MaxFrameBufferBytes = 500L * 1024 * 1024;
+    private const long MaxFrameBufferBytes = 128L * 1024 * 1024;
+    private const int MaxExactWindowCapturePixels = 12_000_000;
+    private const int MaxExactWindowCaptureBytes = 64 * 1024 * 1024;
 
     public ScreenRecordingService(IOpenClawLogger logger)
     {
@@ -158,8 +161,114 @@ internal sealed class ScreenRecordingService : IDisposable
         };
     }
 
+    public async Task<WindowCaptureResult> CaptureWindowAsync(
+        WindowCaptureArgs args,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!GraphicsCaptureSession.IsSupported())
+            throw new InvalidOperationException("Windows Graphics Capture is not supported on this system");
+        if (args.ProcessId <= 0 || args.Hwnd == 0)
+            throw new InvalidOperationException("Exact process id and HWND are required");
+
+        var item = CreateCaptureItemForWindow((IntPtr)args.Hwnd);
+        var width = item.Size.Width;
+        var height = item.Size.Height;
+        if (width <= 0 || height <= 0)
+            throw new InvalidOperationException("Target capture item has an empty surface");
+        var maxPixels = Math.Min(
+            args.MaxPixels > 0 ? args.MaxPixels : MaxExactWindowCapturePixels,
+            MaxExactWindowCapturePixels);
+        if ((long)width * height > maxPixels)
+            throw new InvalidOperationException($"Target capture surface exceeds the {maxPixels:N0}-pixel safety cap");
+
+        var d3d = CreateDirect3DDevice();
+        Direct3D11CaptureFramePool? pool = null;
+        GraphicsCaptureSession? session = null;
+        Direct3D11CaptureFrame? capturedFrame = null;
+        using var ready = new SemaphoreSlim(0, 1);
+        TypedEventHandler<Direct3D11CaptureFramePool, object>? handler = null;
+
+        try
+        {
+            pool = Direct3D11CaptureFramePool.CreateFreeThreaded(
+                d3d,
+                DirectXPixelFormat.B8G8R8A8UIntNormalized,
+                1,
+                new global::Windows.Graphics.SizeInt32 { Width = width, Height = height });
+            session = pool.CreateCaptureSession(item);
+            session.IsCursorCaptureEnabled = false;
+
+            handler = (sender, _) =>
+            {
+                var frame = sender.TryGetNextFrame();
+                if (frame == null) return;
+                if (Interlocked.CompareExchange(ref capturedFrame, frame, null) != null)
+                {
+                    frame.Dispose();
+                    return;
+                }
+                try { ready.Release(); } catch (SemaphoreFullException) { }
+            };
+            pool.FrameArrived += handler;
+            session.StartCapture();
+
+            await ready.WaitAsync(cancellationToken);
+            var frame = Interlocked.Exchange(ref capturedFrame, null)
+                ?? throw new InvalidOperationException("Capture signaled without a frame");
+            using (frame)
+            using (var bitmap = await SoftwareBitmap.CreateCopyFromSurfaceAsync(frame.Surface).AsTask(cancellationToken))
+            {
+                var png = await EncodePngAsync(bitmap, cancellationToken);
+                var maxBytes = Math.Min(
+                    args.MaxOutputBytes > 0 ? args.MaxOutputBytes : MaxExactWindowCaptureBytes,
+                    MaxExactWindowCaptureBytes);
+                if (png.Length > maxBytes)
+                    throw new InvalidOperationException($"PNG output exceeds the {maxBytes} byte safety cap");
+
+                return new WindowCaptureResult
+                {
+                    Width = bitmap.PixelWidth,
+                    Height = bitmap.PixelHeight,
+                    PngBytes = png
+                };
+            }
+        }
+        finally
+        {
+            if (pool != null && handler != null)
+                pool.FrameArrived -= handler;
+            Interlocked.Exchange(ref capturedFrame, null)?.Dispose();
+            session?.Dispose();
+            pool?.Dispose();
+            (d3d as IDisposable)?.Dispose();
+        }
+    }
+
     public void Dispose()
     {
+    }
+
+    private static async Task<byte[]> EncodePngAsync(
+        SoftwareBitmap bitmap,
+        CancellationToken cancellationToken)
+    {
+        using var output = new InMemoryRandomAccessStream();
+        var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, output).AsTask(cancellationToken);
+        encoder.SetSoftwareBitmap(bitmap);
+        await encoder.FlushAsync().AsTask(cancellationToken);
+        if (output.Size > MaxExactWindowCaptureBytes)
+            throw new InvalidOperationException($"PNG output exceeds the {MaxExactWindowCaptureBytes} byte safety cap");
+        if (output.Size > uint.MaxValue)
+            throw new InvalidOperationException("PNG output is too large to read safely");
+
+        var size = (uint)output.Size;
+        output.Seek(0);
+        using var reader = new DataReader(output.GetInputStreamAt(0));
+        await reader.LoadAsync(size).AsTask(cancellationToken);
+        var bytes = new byte[size];
+        reader.ReadBytes(bytes);
+        return bytes;
     }
 
     // Encoding
@@ -299,6 +408,42 @@ internal sealed class ScreenRecordingService : IDisposable
         var device = MarshalInterface<IDirect3DDevice>.FromAbi(winrtPtr);
         Marshal.Release(winrtPtr);
         return device;
+    }
+
+    private static GraphicsCaptureItem CreateCaptureItemForWindow(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+            throw new ArgumentException("HWND must be non-zero", nameof(hwnd));
+
+        const string classId = "Windows.Graphics.Capture.GraphicsCaptureItem";
+        var iid = typeof(IGraphicsCaptureItemInterop).GUID;
+        var hr = WindowsCreateString(classId, classId.Length, out var hstring);
+        Marshal.ThrowExceptionForHR(hr);
+        if (hstring == IntPtr.Zero)
+            throw new InvalidOperationException("GraphicsCaptureItem activation string was null.");
+
+        try
+        {
+            hr = RoGetActivationFactory(hstring, ref iid, out var factoryPtr);
+            Marshal.ThrowExceptionForHR(hr);
+            if (factoryPtr == IntPtr.Zero)
+                throw new InvalidOperationException("GraphicsCaptureItem activation factory was null.");
+
+            var factory = (IGraphicsCaptureItemInterop)Marshal.GetObjectForIUnknown(factoryPtr);
+            Marshal.Release(factoryPtr);
+            var itemIid = new Guid("AF86E2E0-B12D-4C6A-9C5A-D7AA65101E90");
+            factory.CreateForWindow(hwnd, in itemIid, out var itemPtr);
+            if (itemPtr == IntPtr.Zero)
+                throw new InvalidOperationException("GraphicsCaptureItem creation returned a null item.");
+
+            var item = MarshalInspectable<GraphicsCaptureItem>.FromAbi(itemPtr);
+            Marshal.Release(itemPtr);
+            return item;
+        }
+        finally
+        {
+            WindowsDeleteString(hstring);
+        }
     }
 
     private static GraphicsCaptureItem CreateCaptureItem(int screenIndex)
