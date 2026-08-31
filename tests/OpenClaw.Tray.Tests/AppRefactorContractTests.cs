@@ -44,6 +44,21 @@ public sealed class AppRefactorContractTests
     }
 
     [Fact]
+    public void AwlMcpDesktopMode_KeepsDispatcherButSuppressesUserChrome()
+    {
+        var source = ReadAppSources();
+        var startup = ExtractMethod(source, "OnLaunchedAsync");
+
+        Assert.Contains("AWL_MCP_DESKTOP_MODE", source);
+        Assert.Contains("if (AwlMcpDesktopMode)", startup);
+        Assert.Contains("InitializeKeepAliveWindow();", startup);
+        Assert.Contains("AWL MCP desktop mode enabled: tray chrome and startup tips are suppressed", startup);
+        Assert.Contains("if (!AwlMcpDesktopMode &&", startup);
+        Assert.Contains("await ShowOnboardingAsync();", startup);
+        Assert.Contains("!AwlMcpDesktopMode && !setupShownDuringStartup && startupDeepLink != null", startup);
+    }
+
+    [Fact]
     public void Startup_WslKeepAlive_IsOwnedByDedicatedService()
     {
         var source = ReadAppSources();

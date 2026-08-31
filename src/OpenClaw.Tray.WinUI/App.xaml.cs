@@ -281,6 +281,11 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
     // crash log, exec approvals, and the single-instance mutex name all derive from it.
     private static readonly string? DataDirOverride =
         Environment.GetEnvironmentVariable("OPENCLAW_TRAY_DATA_DIR") is { Length: > 0 } v ? v : null;
+    private static readonly bool AwlMcpDesktopMode =
+        string.Equals(
+            Environment.GetEnvironmentVariable("AWL_MCP_DESKTOP_MODE"),
+            "1",
+            StringComparison.Ordinal);
     private static readonly string DataPath = AppIdentity.ResolveLocalDataDirectory();
     private static readonly string DeepLinkPipeName =
         DeepLinkSecurityPolicy.BuildCurrentUserScopedPipeName(DataPath);
@@ -731,8 +736,16 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         // in the onboarding wizard. OnLaunched delegates through a guarded
         // async boundary so onboarding failures are logged instead of escaping
         // before the tray ever initializes.
-        InitializeTrayIcon();
-        ShowSurfaceImprovementsTipIfNeeded();
+        if (AwlMcpDesktopMode)
+        {
+            InitializeKeepAliveWindow();
+            Logger.Info("AWL MCP desktop mode enabled: tray chrome and startup tips are suppressed");
+        }
+        else
+        {
+            InitializeTrayIcon();
+            ShowSurfaceImprovementsTipIfNeeded();
+        }
 
         // Build the DI composition root AFTER the tray is up, so additive plumbing
         // can never delay or preempt tray initialization. It only needs the
@@ -831,8 +844,9 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         var setupShownDuringStartup = false;
         try
         {
-            if ((!_isPostSetupRestart && RequiresSetup(_settings)) ||
-                Environment.GetEnvironmentVariable("OPENCLAW_FORCE_ONBOARDING") == "1")
+            if (!AwlMcpDesktopMode &&
+                ((!_isPostSetupRestart && RequiresSetup(_settings)) ||
+                 Environment.GetEnvironmentVariable("OPENCLAW_FORCE_ONBOARDING") == "1"))
             {
                 await ShowOnboardingAsync();
                 setupShownDuringStartup = true;
@@ -947,11 +961,11 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         var startupDeepLink = _pendingProtocolUri
             ?? (_startupArgs.Length > 1 && IsDeepLinkArg(_startupArgs[1])
                 ? _startupArgs[1] : null);
-        if (!setupShownDuringStartup && startupDeepLink != null)
+        if (!AwlMcpDesktopMode && !setupShownDuringStartup && startupDeepLink != null)
         {
             await HandleDeepLinkAsync(startupDeepLink);
         }
-        else if (!setupShownDuringStartup && string.Equals(_postSetupLaunch, "chat", StringComparison.OrdinalIgnoreCase))
+        else if (!AwlMcpDesktopMode && !setupShownDuringStartup && string.Equals(_postSetupLaunch, "chat", StringComparison.OrdinalIgnoreCase))
         {
             await HandleDeepLinkAsync($"{AppIdentity.ProtocolScheme}://chat");
         }
