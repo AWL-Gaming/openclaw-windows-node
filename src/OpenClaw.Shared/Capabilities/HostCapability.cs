@@ -711,18 +711,44 @@ public sealed class HostCapability : NodeCapabilityBase
         if (operation != "list" && string.IsNullOrWhiteSpace(name))
             return Error("service name is required");
 
+        var maxEntries = Math.Clamp(GetIntArg(args, "maxEntries", 200), 1, 1000);
+        var filter = GetStringArg(args, "filter") ?? (operation == "list" ? name : null) ?? "";
+        var encodedName = Convert.ToBase64String(Encoding.UTF8.GetBytes(name ?? ""));
+        var encodedFilter = Convert.ToBase64String(Encoding.UTF8.GetBytes(filter));
+        var decodePrefix =
+            "$enc=[Text.Encoding]::UTF8;" +
+            "$n=$enc.GetString([Convert]::FromBase64String('" + encodedName + "'));" +
+            "$filter=$enc.GetString([Convert]::FromBase64String('" + encodedFilter + "'));";
+
         var script = operation switch
         {
-            "list" => "Get-Service | Select-Object Name,DisplayName,Status,StartType | ConvertTo-Json -Compress",
-            "status" => "$s=Get-Service -Name $args[0] -ErrorAction Stop; $s | Select-Object Name,DisplayName,Status,StartType | ConvertTo-Json -Compress",
-            "start" => "Start-Service -Name $args[0] -ErrorAction Stop; Get-Service -Name $args[0] | Select-Object Name,DisplayName,Status,StartType | ConvertTo-Json -Compress",
-            "stop" => "Stop-Service -Name $args[0] -ErrorAction Stop; Get-Service -Name $args[0] | Select-Object Name,DisplayName,Status,StartType | ConvertTo-Json -Compress",
-            "restart" => "Restart-Service -Name $args[0] -ErrorAction Stop; Get-Service -Name $args[0] | Select-Object Name,DisplayName,Status,StartType | ConvertTo-Json -Compress",
+            "list" => decodePrefix +
+                "$items=Get-Service;" +
+                "if(-not [string]::IsNullOrWhiteSpace($filter)){" +
+                "$items=$items | Where-Object { $_.Name -like ('*'+$filter+'*') -or $_.DisplayName -like ('*'+$filter+'*') };" +
+                "}" +
+                "$result=@($items | Sort-Object Name | Select-Object -First " + maxEntries + " | Select-Object Name,DisplayName,Status,StartType);" +
+                "$result | ConvertTo-Json -Compress",
+            "status" => decodePrefix +
+                "$s=Get-Service -Name $n -ErrorAction Stop;" +
+                "$s | Select-Object Name,DisplayName,Status,StartType | ConvertTo-Json -Compress",
+            "start" => decodePrefix +
+                "Start-Service -Name $n -ErrorAction Stop;" +
+                "$s=Get-Service -Name $n -ErrorAction Stop; $s.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running,[TimeSpan]::FromSeconds(15));" +
+                "$s.Refresh(); $s | Select-Object Name,DisplayName,Status,StartType | ConvertTo-Json -Compress",
+            "stop" => decodePrefix +
+                "Stop-Service -Name $n -ErrorAction Stop;" +
+                "$s=Get-Service -Name $n -ErrorAction Stop; $s.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped,[TimeSpan]::FromSeconds(15));" +
+                "$s.Refresh(); $s | Select-Object Name,DisplayName,Status,StartType | ConvertTo-Json -Compress",
+            "restart" => decodePrefix +
+                "Restart-Service -Name $n -ErrorAction Stop;" +
+                "$s=Get-Service -Name $n -ErrorAction Stop; $s.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running,[TimeSpan]::FromSeconds(20));" +
+                "$s.Refresh(); $s | Select-Object Name,DisplayName,Status,StartType | ConvertTo-Json -Compress",
             _ => throw new InvalidOperationException("unsupported service operation")
         };
         return await RunJsonProcessAsync(
             "powershell.exe",
-            ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script, name ?? ""],
+            ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
             null,
             DefaultTimeoutMs,
             cancellationToken);
@@ -1155,15 +1181,30 @@ public sealed class HostCapability : NodeCapabilityBase
         using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response.Payload));
         var root = doc.RootElement;
         var stdout = root.GetProperty("stdout").GetString() ?? "";
-        object? json = null;
-        try { json = JsonSerializer.Deserialize<object>(stdout); } catch { }
+        var stderr = root.GetProperty("stderr").GetString() ?? "";
+        var exitCode = root.GetProperty("exitCode").GetInt32();
+        if (exitCode != 0)
+        {
+            var detail = string.IsNullOrWhiteSpace(stderr) ? stdout : stderr;
+            return Error(string.IsNullOrWhiteSpace(detail)
+                ? $"structured helper process exited with code {exitCode}"
+                : detail.Trim());
+        }
+
+        object? json;
+        try
+        {
+            json = JsonSerializer.Deserialize<object>(stdout);
+        }
+        catch (JsonException ex)
+        {
+            return Error($"structured helper returned invalid JSON: {ex.Message}");
+        }
         return Success(new
         {
             processId = root.GetProperty("processId").GetInt32(),
-            exitCode = root.GetProperty("exitCode").GetInt32(),
-            stderr = root.GetProperty("stderr").GetString(),
-            result = json,
-            stdout
+            exitCode,
+            result = json
         });
     }
 
